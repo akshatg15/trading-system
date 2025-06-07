@@ -1,0 +1,39 @@
+name = "trading-system-webhook-relay"
+main = "src/index.js"
+compatibility_date = "2024-01-15"
+compatibility_flags = ["nodejs_compat"]
+
+# Environment variables (set via `wrangler secret put`)
+[env.production.vars]
+ENVIRONMENT = "production"
+
+[env.staging.vars]
+ENVIRONMENT = "staging"
+
+# KV namespace bindings
+[[kv_namespaces]]
+binding = "TRADING_KV"
+id = "d9ef88f7bd9845a19031be92052940b1"
+preview_id = "d9ef88f7bd9845a19031be92052940b0"
+
+# Worker routes (replace with your actual domain)
+[env.production]
+routes = [
+    { custom_domain = "https://tradesyswebhook.jabalpurskincentre.com" }
+]
+
+[env.staging]
+routes = [
+  { custom_domain = "https://tradesyswebhook.jabalpurskincentre.com" }
+]
+
+# Custom domains (optional)
+# [env.production]
+# custom_domain = "trading-api.yourdomain.com"
+
+# [env.staging]  
+# custom_domain = "staging-trading-api.yourdomain.com"
+
+# Resource limits
+[limits]
+cpu_ms = 30000  # 30 seconds max CPU time per request 

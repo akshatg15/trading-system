@@ -1,0 +1,34 @@
+{
+  "name": "trading-system-cf-worker",
+  "version": "1.0.0",
+  "description": "Cloudflare Worker for Trading System Webhook Relay",
+  "main": "src/index.js",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "deploy:staging": "wrangler deploy --env staging",
+    "deploy:production": "wrangler deploy --env production", 
+    "dev": "wrangler dev",
+    "test": "wrangler dev --local",
+    "tail": "wrangler tail",
+    "kv:create": "wrangler kv:namespace create TRADING_KV",
+    "kv:create:preview": "wrangler kv:namespace create TRADING_KV --preview",
+    "setup": "npm run kv:create && npm run kv:create:preview"
+  },
+  "keywords": [
+    "cloudflare-worker",
+    "trading",
+    "webhook",
+    "relay",
+    "mt5"
+  ],
+  "author": "Trading System",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "wrangler": "^4.19.0"
+  },
+  "dependencies": {},
+  "engines": {
+    "node": ">=22.0.0"
+  }
+} 

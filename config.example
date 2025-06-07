@@ -1,0 +1,19 @@
+# Database Configuration
+DATABASE_URL=postgresql://neondb_owner:your_password@your_host.neon.tech/neondb?sslmode=require
+
+# Trading Engine Configuration
+MT5_ENDPOINT=http://localhost:8080
+WEBHOOK_SECRET=your_webhook_secret_here
+SERVER_PORT=8081
+
+# Risk Management
+RISK_MAX_DAILY_LOSS=1000.00
+RISK_MAX_POSITION_SIZE=0.1
+RISK_MAX_OPEN_POSITIONS=3
+
+# Logging
+LOG_LEVEL=info
+LOG_FORMAT=json
+
+# Environment
+ENVIRONMENT=development 
