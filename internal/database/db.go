@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"trading-system/internal/config"
@@ -161,25 +162,81 @@ func (db *DB) CreateTrade(ctx context.Context, req *CreateTradeRequest) (*Trade,
 
 // UpdateTradeStatus updates the status and details of a trade
 func (db *DB) UpdateTradeStatus(ctx context.Context, tradeID int, req *UpdateTradeStatusRequest) error {
-	query := `
-		UPDATE trades 
-		SET status = $1, mt5_ticket = COALESCE($2, mt5_ticket), 
-		    mt5_response = COALESCE($3, mt5_response),
-		    entry_price = COALESCE($4, entry_price),
-		    current_price = COALESCE($5, current_price),
-		    profit_loss = COALESCE($6, profit_loss),
-		    commission = COALESCE($7, commission),
-		    swap = COALESCE($8, swap),
-		    updated_at = NOW(),
-		    closed_at = CASE WHEN $1 IN ('closed', 'cancelled') THEN NOW() ELSE closed_at END
-		WHERE id = $9
-	`
 
-	result, err := db.conn.ExecContext(
-		ctx, query,
-		req.Status, req.MT5Ticket, req.MT5Response, req.EntryPrice,
-		req.CurrentPrice, req.ProfitLoss, req.Commission, req.Swap, tradeID,
-	)
+	// Build dynamic query based on what fields are provided
+	var setParts []string
+	var args []interface{}
+	argIndex := 1
+
+	// Status is always required
+	if req.Status == "" {
+		return fmt.Errorf("status is required")
+	}
+	setParts = append(setParts, fmt.Sprintf("status = $%d", argIndex))
+	args = append(args, req.Status)
+	argIndex++
+
+	// Add optional fields only if they're provided
+	if req.MT5Ticket != nil {
+		setParts = append(setParts, fmt.Sprintf("mt5_ticket = $%d", argIndex))
+		args = append(args, *req.MT5Ticket)
+		argIndex++
+	}
+
+	if req.MT5Response != nil {
+		setParts = append(setParts, fmt.Sprintf("mt5_response = $%d", argIndex))
+		args = append(args, *req.MT5Response)
+		argIndex++
+	}
+
+	if req.EntryPrice != nil {
+		setParts = append(setParts, fmt.Sprintf("entry_price = $%d", argIndex))
+		args = append(args, *req.EntryPrice)
+		argIndex++
+	}
+
+	if req.CurrentPrice != nil {
+		setParts = append(setParts, fmt.Sprintf("current_price = $%d", argIndex))
+		args = append(args, *req.CurrentPrice)
+		argIndex++
+	}
+
+	if req.ProfitLoss != nil {
+		setParts = append(setParts, fmt.Sprintf("profit_loss = $%d", argIndex))
+		args = append(args, *req.ProfitLoss)
+		argIndex++
+	}
+
+	if req.Commission != nil {
+		setParts = append(setParts, fmt.Sprintf("commission = $%d", argIndex))
+		args = append(args, *req.Commission)
+		argIndex++
+	}
+
+	if req.Swap != nil {
+		setParts = append(setParts, fmt.Sprintf("swap = $%d", argIndex))
+		args = append(args, *req.Swap)
+		argIndex++
+	}
+
+	// Always update updated_at
+	setParts = append(setParts, "updated_at = NOW()")
+
+	// Handle closed_at based on status
+	if req.Status == "closed" || req.Status == "cancelled" {
+		setParts = append(setParts, "closed_at = NOW()")
+	}
+
+	// Build final query
+	query := fmt.Sprintf(`
+		UPDATE trades 
+		SET %s
+		WHERE id = $%d
+	`, strings.Join(setParts, ", "), argIndex)
+
+	args = append(args, tradeID)
+
+	result, err := db.conn.ExecContext(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("failed to update trade status: %w", err)
 	}

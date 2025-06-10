@@ -170,8 +170,11 @@ func (p *Processor) processTradingViewSignal(ctx context.Context, signal *databa
 	// Execute entry trade via MT5
 	if err := p.executeTrade(ctx, entryTrade); err != nil {
 		log.Printf("Failed to execute entry trade %d: %v", entryTrade.ID, err)
+		// Update trade status but don't return error - signal should still be marked as processed
+		// since the trade record was created successfully
 		p.updateTradeStatus(ctx, entryTrade.ID, "rejected", nil)
-		return err
+		log.Printf("Trade %d marked as rejected due to execution failure", entryTrade.ID)
+		// Continue with TP trades creation even if entry failed (they'll be in pending state)
 	}
 
 	// Create TP1 and TP2 trades if available
@@ -535,12 +538,23 @@ func (p *Processor) parseTradingViewWebhook(data []byte) (*database.CreateSignal
 	// Parse timestamp (flexible format)
 	timestampStr := p.parseTimestamp(webhook.Timestamp)
 
+	// Clean up the payload to avoid large timestamp values causing DB overflow
+	cleanedPayload := data
+	if len(webhook.Timestamp) > 0 {
+		// Replace the original timestamp with the parsed string version to avoid overflow
+		webhookCopy := webhook
+		webhookCopy.Timestamp = json.RawMessage(`"` + timestampStr + `"`)
+		if cleanedData, err := json.Marshal(webhookCopy); err == nil {
+			cleanedPayload = cleanedData
+		}
+	}
+
 	// Create signal request
 	req := &database.CreateSignalRequest{
 		Source:     "tradingview",
 		Symbol:     webhook.Ticker,
 		SignalType: signalType,
-		Payload:    data, // Store the raw webhook data
+		Payload:    cleanedPayload, // Store the cleaned webhook data
 	}
 
 	// Helper function to validate and set price fields
@@ -548,11 +562,14 @@ func (p *Processor) parseTradingViewWebhook(data []byte) (*database.CreateSignal
 		if price == nil || *price <= 0 {
 			return nil, nil
 		}
-		// Validate price is within reasonable range (max 10 digits before decimal)
-		if *price > 9999999999.99999 {
-			return nil, fmt.Errorf("%s value too large: %.5f", fieldName, *price)
+		// Validate price is within reasonable range for DECIMAL(20,8) - max 12 digits before decimal, 8 after
+		// Maximum safe value is 999999999999.99999999
+		if *price > 999999999999.99999999 {
+			return nil, fmt.Errorf("%s value too large: %.8f (max allowed: 999999999999.99999999)", fieldName, *price)
 		}
-		return price, nil
+		// Round to 8 decimal places to match database precision
+		rounded := float64(int(*price*100000000+0.5)) / 100000000
+		return &rounded, nil
 	}
 
 	// Add optional price fields with validation
@@ -604,6 +621,10 @@ func (p *Processor) parseTradingViewWebhook(data []byte) (*database.CreateSignal
 		safeFloatValue(req.TP2),
 		timestampStr)
 
+	// Debug log the actual values being sent to database
+	log.Printf("DB values: Price=%v, StopLoss=%v, TP1=%v, TP2=%v",
+		req.Price, req.StopLoss, req.TP1, req.TP2)
+
 	return req, nil
 }
 
@@ -622,6 +643,18 @@ func (p *Processor) parseTimestamp(timestampRaw json.RawMessage) string {
 	// Try to parse as number (Unix timestamp)
 	var timestampNum int64
 	if err := json.Unmarshal(timestampRaw, &timestampNum); err == nil {
+		// Handle both seconds and milliseconds timestamps
+		if timestampNum > 1e12 {
+			// If timestamp is larger than 1e12, it's likely in milliseconds
+			timestampNum = timestampNum / 1000
+		}
+
+		// Validate timestamp is within reasonable range (year 1970-2100)
+		if timestampNum < 0 || timestampNum > 4102444800 { // Jan 1, 2100
+			log.Printf("Warning: Invalid timestamp %d, using current time", timestampNum)
+			return time.Now().Format(time.RFC3339)
+		}
+
 		return time.Unix(timestampNum, 0).Format(time.RFC3339)
 	}
 
