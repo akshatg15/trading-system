@@ -48,19 +48,19 @@ func (db *DB) Close() error {
 // CreateSignal inserts a new signal into the database
 func (db *DB) CreateSignal(ctx context.Context, req *CreateSignalRequest) (*Signal, error) {
 	query := `
-		INSERT INTO signals (source, symbol, signal_type, price, stop_loss, take_profit, payload)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
-		RETURNING id, uuid, source, symbol, signal_type, price, stop_loss, take_profit, 
+		INSERT INTO signals (source, symbol, signal_type, price, stop_loss, take_profit, tp1, tp2, sl1, sl2, payload)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		RETURNING id, uuid, source, symbol, signal_type, price, stop_loss, take_profit, tp1, tp2, sl1, sl2,
 		          payload, processed, processed_at, created_at, updated_at
 	`
 
 	signal := &Signal{}
 	err := db.conn.QueryRowContext(
 		ctx, query,
-		req.Source, req.Symbol, req.SignalType, req.Price, req.StopLoss, req.TakeProfit, req.Payload,
+		req.Source, req.Symbol, req.SignalType, req.Price, req.StopLoss, req.TakeProfit, req.TP1, req.TP2, req.SL1, req.SL2, req.Payload,
 	).Scan(
 		&signal.ID, &signal.UUID, &signal.Source, &signal.Symbol, &signal.SignalType,
-		&signal.Price, &signal.StopLoss, &signal.TakeProfit, &signal.Payload,
+		&signal.Price, &signal.StopLoss, &signal.TakeProfit, &signal.TP1, &signal.TP2, &signal.SL1, &signal.SL2, &signal.Payload,
 		&signal.Processed, &signal.ProcessedAt, &signal.CreatedAt, &signal.UpdatedAt,
 	)
 
@@ -74,7 +74,7 @@ func (db *DB) CreateSignal(ctx context.Context, req *CreateSignalRequest) (*Sign
 // GetUnprocessedSignals retrieves all unprocessed signals
 func (db *DB) GetUnprocessedSignals(ctx context.Context) ([]*Signal, error) {
 	query := `
-		SELECT id, uuid, source, symbol, signal_type, price, stop_loss, take_profit,
+		SELECT id, uuid, source, symbol, signal_type, price, stop_loss, take_profit, tp1, tp2, sl1, sl2,
 		       payload, processed, processed_at, created_at, updated_at
 		FROM signals 
 		WHERE processed = false 
@@ -92,7 +92,7 @@ func (db *DB) GetUnprocessedSignals(ctx context.Context) ([]*Signal, error) {
 		signal := &Signal{}
 		err := rows.Scan(
 			&signal.ID, &signal.UUID, &signal.Source, &signal.Symbol, &signal.SignalType,
-			&signal.Price, &signal.StopLoss, &signal.TakeProfit, &signal.Payload,
+			&signal.Price, &signal.StopLoss, &signal.TakeProfit, &signal.TP1, &signal.TP2, &signal.SL1, &signal.SL2, &signal.Payload,
 			&signal.Processed, &signal.ProcessedAt, &signal.CreatedAt, &signal.UpdatedAt,
 		)
 		if err != nil {
@@ -132,22 +132,22 @@ func (db *DB) MarkSignalProcessed(ctx context.Context, signalID int) error {
 // CreateTrade inserts a new trade into the database
 func (db *DB) CreateTrade(ctx context.Context, req *CreateTradeRequest) (*Trade, error) {
 	query := `
-		INSERT INTO trades (signal_id, symbol, order_type, direction, volume, entry_price, stop_loss, take_profit)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		RETURNING id, uuid, signal_id, symbol, order_type, direction, volume, entry_price,
-		          current_price, stop_loss, take_profit, status, mt5_ticket, mt5_response,
+		INSERT INTO trades (signal_id, parent_signal_id, trade_type, symbol, order_type, direction, volume, entry_price, stop_loss, take_profit, tp1, tp2, sl1, sl2)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+		RETURNING id, uuid, signal_id, parent_signal_id, trade_type, symbol, order_type, direction, volume, entry_price,
+		          current_price, stop_loss, take_profit, tp1, tp2, sl1, sl2, status, mt5_ticket, mt5_response,
 		          profit_loss, commission, swap, created_at, updated_at, closed_at
 	`
 
 	trade := &Trade{}
 	err := db.conn.QueryRowContext(
 		ctx, query,
-		req.SignalID, req.Symbol, req.OrderType, req.Direction, req.Volume,
-		req.EntryPrice, req.StopLoss, req.TakeProfit,
+		req.SignalID, req.ParentSignalID, req.TradeType, req.Symbol, req.OrderType, req.Direction, req.Volume,
+		req.EntryPrice, req.StopLoss, req.TakeProfit, req.TP1, req.TP2, req.SL1, req.SL2,
 	).Scan(
-		&trade.ID, &trade.UUID, &trade.SignalID, &trade.Symbol, &trade.OrderType,
+		&trade.ID, &trade.UUID, &trade.SignalID, &trade.ParentSignalID, &trade.TradeType, &trade.Symbol, &trade.OrderType,
 		&trade.Direction, &trade.Volume, &trade.EntryPrice, &trade.CurrentPrice,
-		&trade.StopLoss, &trade.TakeProfit, &trade.Status, &trade.MT5Ticket,
+		&trade.StopLoss, &trade.TakeProfit, &trade.TP1, &trade.TP2, &trade.SL1, &trade.SL2, &trade.Status, &trade.MT5Ticket,
 		&trade.MT5Response, &trade.ProfitLoss, &trade.Commission, &trade.Swap,
 		&trade.CreatedAt, &trade.UpdatedAt, &trade.ClosedAt,
 	)
@@ -199,8 +199,8 @@ func (db *DB) UpdateTradeStatus(ctx context.Context, tradeID int, req *UpdateTra
 // GetOpenTrades retrieves all open trades
 func (db *DB) GetOpenTrades(ctx context.Context) ([]*Trade, error) {
 	query := `
-		SELECT id, uuid, signal_id, symbol, order_type, direction, volume, entry_price,
-		       current_price, stop_loss, take_profit, status, mt5_ticket, mt5_response,
+		SELECT id, uuid, signal_id, parent_signal_id, trade_type, symbol, order_type, direction, volume, entry_price,
+		       current_price, stop_loss, take_profit, tp1, tp2, sl1, sl2, status, mt5_ticket, mt5_response,
 		       profit_loss, commission, swap, created_at, updated_at, closed_at
 		FROM trades 
 		WHERE status IN ('pending', 'filled', 'partial')
@@ -217,9 +217,9 @@ func (db *DB) GetOpenTrades(ctx context.Context) ([]*Trade, error) {
 	for rows.Next() {
 		trade := &Trade{}
 		err := rows.Scan(
-			&trade.ID, &trade.UUID, &trade.SignalID, &trade.Symbol, &trade.OrderType,
+			&trade.ID, &trade.UUID, &trade.SignalID, &trade.ParentSignalID, &trade.TradeType, &trade.Symbol, &trade.OrderType,
 			&trade.Direction, &trade.Volume, &trade.EntryPrice, &trade.CurrentPrice,
-			&trade.StopLoss, &trade.TakeProfit, &trade.Status, &trade.MT5Ticket,
+			&trade.StopLoss, &trade.TakeProfit, &trade.TP1, &trade.TP2, &trade.SL1, &trade.SL2, &trade.Status, &trade.MT5Ticket,
 			&trade.MT5Response, &trade.ProfitLoss, &trade.Commission, &trade.Swap,
 			&trade.CreatedAt, &trade.UpdatedAt, &trade.ClosedAt,
 		)
@@ -245,4 +245,4 @@ func (db *DB) LogEvent(ctx context.Context, level, message, component string, co
 	}
 
 	return nil
-} 
+}

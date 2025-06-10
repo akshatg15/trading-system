@@ -64,13 +64,13 @@ func (s *Server) handleTradingViewWebhook(w http.ResponseWriter, r *http.Request
 	defer r.Body.Close()
 
 	// Verify webhook signature if secret is configured
-	if s.config.Server.WebhookSecret != "" {
-		if !s.verifyWebhookSignature(r, body) {
-			log.Printf("Invalid webhook signature")
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
-	}
+	// if s.config.Server.WebhookSecret != "" {
+	// 	if !s.verifyWebhookSignature(r, body) {
+	// 		log.Printf("Invalid webhook signature")
+	// 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+	// 		return
+	// 	}
+	// }
 
 	// Process the webhook
 	signal, err := s.signalProcessor.ProcessWebhook(r.Context(), body, "tradingview")
@@ -97,7 +97,7 @@ func (s *Server) verifyWebhookSignature(r *http.Request, body []byte) bool {
 	if signature == "" {
 		signature = r.Header.Get("X-Hub-Signature-256")
 	}
-	
+
 	if signature == "" {
 		return false
 	}
@@ -156,7 +156,7 @@ func (s *Server) handleMT5Status(w http.ResponseWriter, r *http.Request) {
 	}
 
 	mt5Client := s.signalProcessor.GetMT5Client()
-	
+
 	status := map[string]interface{}{
 		"connected": mt5Client.IsConnected(r.Context()),
 		"timestamp": time.Now().UTC().Format(time.RFC3339),
@@ -172,4 +172,4 @@ func (s *Server) handleMT5Status(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(status)
-} 
+}

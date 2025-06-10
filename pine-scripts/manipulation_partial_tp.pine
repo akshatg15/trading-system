@@ -1,0 +1,89 @@
+//@version=5
+strategy("Manipulation Candle Entry - Partial TP + Plotting", overlay=true)
+
+testShort = input.bool(false, "Trigger Short Alert Now")
+
+// Wrap timestamp in double quotes
+getTimestampStr() =>
+    '"' + str.tostring(time) + '"'
+
+if testShort
+    alertMsg = '{ "ticker":"'+syminfo.ticker+'", "action":"sell", "entry":'+str.tostring(close)+', "stop_loss":'+str.tostring(high)+', "tp1":'+str.tostring(close - (high - close))+', "tp2":'+str.tostring(close - 2 * (high - close))+', "timestamp":'+getTimestampStr()+' }'
+    alert(alertMsg, alert.freq_once_per_bar)
+
+// === Manipulation Candle Detection ===
+prevHigh = high[1]
+prevLow = low[1]
+prevClose = close[1]
+
+// Bullish Manipulation: Current candle wicks below previous low but closes above previous high
+isBullMC = low < prevLow and close > prevHigh and low < prevClose
+// Bearish Manipulation: Current candle wicks above previous high but closes below previous low  
+isBearMC = high > prevHigh and close < prevLow and high > prevClose
+
+// === Entry Conditions ===
+enterLong = isBullMC and not isBullMC[1]  // Only on new manipulation candle
+enterShort = isBearMC and not isBearMC[1] // Only on new manipulation candle
+
+// === Persistent Trade State ===
+var float entryPrice = na
+var float stopLoss = na
+var float takeProfit1 = na
+var float takeProfit2 = na
+var string tradeSide = na
+var bool inTrade = false
+
+// === LONG Entry ===
+if enterLong and not inTrade
+    entryPrice := close
+    stopLoss := prevLow
+    riskReward = entryPrice - stopLoss
+    takeProfit1 := entryPrice + riskReward      // 1:1 RR
+    takeProfit2 := entryPrice + 2 * riskReward  // 1:2 RR
+    tradeSide := "long"
+    inTrade := true
+    
+    alert_message = '{ "ticker":"'+syminfo.ticker+'", "action":"buy", "entry":'+str.tostring(entryPrice)+', "stop_loss":'+str.tostring(stopLoss)+', "tp1":'+str.tostring(takeProfit1)+', "tp2":'+str.tostring(takeProfit2)+', "volume":0.01, "timestamp":'+getTimestampStr()+' }'
+    strategy.entry("Long", strategy.long, alert_message=alert_message)
+    strategy.exit("TP1", from_entry="Long", limit=takeProfit1, stop=stopLoss, qty_percent=50)
+    strategy.exit("TP2", from_entry="Long", limit=takeProfit2, stop=stopLoss)
+
+// === SHORT Entry ===
+if enterShort and not inTrade
+    entryPrice := close
+    stopLoss := prevHigh
+    riskReward = stopLoss - entryPrice
+    takeProfit1 := entryPrice - riskReward      // 1:1 RR
+    takeProfit2 := entryPrice - 2 * riskReward  // 1:2 RR
+    tradeSide := "short"
+    inTrade := true
+    
+    alert_message = '{ "ticker":"'+syminfo.ticker+'", "action":"sell", "entry":'+str.tostring(entryPrice)+', "stop_loss":'+str.tostring(stopLoss)+', "tp1":'+str.tostring(takeProfit1)+', "tp2":'+str.tostring(takeProfit2)+', "volume":0.01, "timestamp":'+getTimestampStr()+' }'
+    strategy.entry("Short", strategy.short, alert_message=alert_message)
+    strategy.exit("TP1", from_entry="Short", limit=takeProfit1, stop=stopLoss, qty_percent=50)
+    strategy.exit("TP2", from_entry="Short", limit=takeProfit2, stop=stopLoss)
+
+// === Reset logic after full exit
+if inTrade
+    exitReached = (tradeSide == "long" and (low <= stopLoss or high >= takeProfit2)) or
+                  (tradeSide == "short" and (high >= stopLoss or low <= takeProfit2))
+    if exitReached
+        inTrade := false
+        entryPrice := na
+        stopLoss := na
+        takeProfit1 := na
+        takeProfit2 := na
+        tradeSide := na
+
+// === Plotting ===
+barcolor(isBullMC ? color.orange : isBearMC ? color.orange : na)
+
+// Plot manipulation candles
+plotshape(isBullMC, style=shape.triangleup, location=location.belowbar, color=color.green, size=size.small, title="Bull MC")
+plotshape(isBearMC, style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small, title="Bear MC")
+
+// Plot trade levels
+plot(inTrade and not na(entryPrice) ? entryPrice : na, title="Entry", color=color.blue, style=plot.style_linebr, linewidth=2)
+plot(inTrade and not na(stopLoss) ? stopLoss : na, title="Stop Loss", color=color.red, style=plot.style_linebr, linewidth=2)
+plot(inTrade and not na(takeProfit1) ? takeProfit1 : na, title="Take Profit 1", color=color.teal, style=plot.style_linebr, linewidth=2)
+plot(inTrade and not na(takeProfit2) ? takeProfit2 : na, title="Take Profit 2", color=color.green, style=plot.style_linebr, linewidth=2)
