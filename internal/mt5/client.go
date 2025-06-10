@@ -42,6 +42,8 @@ type TradeRequest struct {
 	Price      float64 `json:"price,omitempty"`      // for limit orders
 	StopLoss   float64 `json:"stop_loss,omitempty"`
 	TakeProfit float64 `json:"take_profit,omitempty"`
+	TP1        float64 `json:"tp1,omitempty"`         // First take profit level
+	TP2        float64 `json:"tp2,omitempty"`         // Second take profit level
 	OrderType  string  `json:"order_type"` // "market", "limit", "stop"
 	Comment    string  `json:"comment,omitempty"`
 	Magic      int     `json:"magic,omitempty"` // EA magic number
@@ -49,15 +51,21 @@ type TradeRequest struct {
 
 // TradeResponse represents MT5 trade execution response
 type TradeResponse struct {
-	Success    bool    `json:"success"`
-	Ticket     int64   `json:"ticket,omitempty"`
-	Price      float64 `json:"price,omitempty"`
-	Volume     float64 `json:"volume,omitempty"`
-	ErrorCode  int     `json:"error_code,omitempty"`
-	ErrorMsg   string  `json:"error_msg,omitempty"`
-	Commission float64 `json:"commission,omitempty"`
-	Swap       float64 `json:"swap,omitempty"`
-	Profit     float64 `json:"profit,omitempty"`
+	Success              bool    `json:"success"`
+	Ticket               int64   `json:"ticket,omitempty"`               // Single ticket (legacy)
+	Tickets              []int64 `json:"tickets,omitempty"`              // Multiple tickets for partial TP
+	Price                float64 `json:"price,omitempty"`
+	Volume               float64 `json:"volume,omitempty"`
+	Volumes              []float64 `json:"volumes,omitempty"`             // Multiple volumes for partial TP
+	Prices               []float64 `json:"prices,omitempty"`              // Multiple prices for partial TP
+	ErrorCode            int     `json:"error_code,omitempty"`
+	ErrorMsg             string  `json:"error_msg,omitempty"`
+	Commission           float64 `json:"commission,omitempty"`
+	Swap                 float64 `json:"swap,omitempty"`
+	Profit               float64 `json:"profit,omitempty"`
+	PartialTPStrategy    bool    `json:"partial_tp_strategy,omitempty"`  // Indicates if partial TP was used
+	TP1Ticket            int64   `json:"tp1_ticket,omitempty"`           // TP1 position ticket
+	TP2Ticket            int64   `json:"tp2_ticket,omitempty"`           // TP2 position ticket
 }
 
 // PositionInfo represents current position information
@@ -172,6 +180,39 @@ func (c *Client) GetPositions(ctx context.Context) ([]*PositionInfo, error) {
 	}
 
 	return positions, nil
+}
+
+// GetPositionCount retrieves the number of open positions efficiently
+func (c *Client) GetPositionCount(ctx context.Context) (int, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+"/position-count", nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("HTTP request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("MT5 bridge returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var countResp struct {
+		Count     int    `json:"count"`
+		Timestamp string `json:"timestamp"`
+	}
+	if err := json.Unmarshal(body, &countResp); err != nil {
+		return 0, fmt.Errorf("failed to unmarshal position count: %w", err)
+	}
+
+	return countResp.Count, nil
 }
 
 // GetAccountInfo retrieves account information

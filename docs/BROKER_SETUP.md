@@ -173,7 +173,7 @@ Base Currency: Your local currency
 ```bash
 # Conservative settings for live trading
 RISK_MAX_DAILY_LOSS=100.00
-RISK_MAX_POSITION_SIZE=0.01  # 0.01 lots = $1 per pip
+RISK_MAX_POSITION_SIZE=0.10  # 0.10 lots = $10 per pip
 RISK_MAX_OPEN_POSITIONS=2
 ```
 

@@ -287,6 +287,19 @@ func (p *Processor) executeTrade(ctx context.Context, trade *database.Trade) err
 	if trade.TakeProfit != nil {
 		mt5Req.TakeProfit = *trade.TakeProfit
 	}
+	
+	// Add TP1 and TP2 if available
+	if trade.TP1 != nil {
+		mt5Req.TP1 = *trade.TP1
+		log.Printf("Setting TP1: %.5f for trade %d", *trade.TP1, trade.ID)
+	}
+	if trade.TP2 != nil {
+		mt5Req.TP2 = *trade.TP2
+		log.Printf("Setting TP2: %.5f for trade %d", *trade.TP2, trade.ID)
+	}
+	
+	log.Printf("Sending trade to MT5: Symbol=%s, Action=%s, Volume=%.2f, TP1=%.5f, TP2=%.5f", 
+		mt5Req.Symbol, mt5Req.Action, mt5Req.Volume, mt5Req.TP1, mt5Req.TP2)
 
 	// Send trade to MT5
 	response, err := p.mt5Client.SendTrade(ctx, mt5Req)
@@ -304,8 +317,26 @@ func (p *Processor) executeTrade(ctx context.Context, trade *database.Trade) err
 
 	if response.Success {
 		updateReq.Status = "filled"
-		updateReq.MT5Ticket = &response.Ticket
-		updateReq.EntryPrice = &response.Price
+		
+		// Handle both single and multiple ticket responses
+		if response.PartialTPStrategy && len(response.Tickets) > 0 {
+			// For partial TP strategy, use the primary ticket (TP1)
+			updateReq.MT5Ticket = &response.TP1Ticket
+			if len(response.Prices) > 0 {
+				updateReq.EntryPrice = &response.Prices[0]
+			}
+			log.Printf("Trade %d executed with partial TP strategy: TP1 ticket=%d, TP2 ticket=%d", 
+				trade.ID, response.TP1Ticket, response.TP2Ticket)
+		} else {
+			// Single position response
+			if response.Ticket != 0 {
+				updateReq.MT5Ticket = &response.Ticket
+			} else if len(response.Tickets) > 0 {
+				updateReq.MT5Ticket = &response.Tickets[0]
+			}
+			updateReq.EntryPrice = &response.Price
+		}
+		
 		if response.Commission != 0 {
 			updateReq.Commission = &response.Commission
 		}
@@ -403,6 +434,7 @@ func (p *Processor) syncPositionsFromMT5(ctx context.Context) error {
 		if pos, exists := mt5Tickets[*trade.MT5Ticket]; exists {
 			// Position still exists in MT5, update current data
 			updateReq := &database.UpdateTradeStatusRequest{
+				Status:       "filled", // Ensure status is set
 				CurrentPrice: &pos.CurrentPrice,
 				ProfitLoss:   &pos.Profit,
 				Commission:   &pos.Commission,
@@ -430,7 +462,7 @@ func (p *Processor) calculatePositionSize(symbol string, requestedVolume float64
 	}
 
 	// Default to minimum volume (0.01 lots for personal trading)
-	return 0.01
+	return 0.10
 }
 
 // validateRiskParameters validates trade parameters against risk management rules
@@ -468,7 +500,45 @@ func (p *Processor) validateRiskParametersFromSignal(ctx context.Context, signal
 			volume, p.config.Risk.MaxPositionSize)
 	}
 
-	// Check number of open positions
+	// Check number of open positions using actual MT5 positions
+	if p.mt5Client.IsConnected(ctx) {
+		// Use efficient position count endpoint
+		positionCount, err := p.mt5Client.GetPositionCount(ctx)
+		if err != nil {
+			log.Printf("Warning: Failed to get MT5 position count for risk check, falling back to database: %v", err)
+			// Fallback to database check
+			return p.validateRiskParametersFromDatabase(ctx, volume)
+		}
+		
+		if positionCount >= p.config.Risk.MaxOpenPositions {
+			return fmt.Errorf("maximum open positions reached (%d)", p.config.Risk.MaxOpenPositions)
+		}
+		
+		log.Printf("Risk check passed: %d/%d positions open", positionCount, p.config.Risk.MaxOpenPositions)
+	} else {
+		// Fallback to database check if MT5 not available
+		log.Printf("Warning: MT5 not connected, using database for risk check")
+		return p.validateRiskParametersFromDatabase(ctx, volume)
+	}
+
+	// TODO: Add more risk checks:
+	// - Daily loss limit
+	// - Correlation checks
+	// - Account balance checks
+	// - Symbol-specific limits
+
+	return nil
+}
+
+// validateRiskParametersFromDatabase is a fallback method using database records
+func (p *Processor) validateRiskParametersFromDatabase(ctx context.Context, volume float64) error {
+	// Check position size
+	if volume > p.config.Risk.MaxPositionSize {
+		return fmt.Errorf("position size %.2f exceeds maximum allowed %.2f",
+			volume, p.config.Risk.MaxPositionSize)
+	}
+
+	// Check number of open positions from database
 	openTrades, err := p.db.GetOpenTrades(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get open trades for risk check: %w", err)
@@ -477,12 +547,6 @@ func (p *Processor) validateRiskParametersFromSignal(ctx context.Context, signal
 	if len(openTrades) >= p.config.Risk.MaxOpenPositions {
 		return fmt.Errorf("maximum open positions reached (%d)", p.config.Risk.MaxOpenPositions)
 	}
-
-	// TODO: Add more risk checks:
-	// - Daily loss limit
-	// - Correlation checks
-	// - Account balance checks
-	// - Symbol-specific limits
 
 	return nil
 }
