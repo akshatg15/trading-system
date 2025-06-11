@@ -717,6 +717,56 @@ class MT5Bridge:
             logger.error(f"Error getting account info: {e}")
             return {'connected': False}
 
+    def get_orders(self) -> List[Dict[str, Any]]:
+        """Get all pending orders."""
+        try:
+            orders = mt5.orders_get()
+            if orders is None:
+                return []
+            
+            result = []
+            for order in orders:
+                result.append({
+                    'ticket': order.ticket,
+                    'symbol': order.symbol,
+                    'volume': order.volume_current,
+                    'type': self._order_type_to_string(order.type),
+                    'price': order.price_open,
+                    'stop_loss': order.sl,
+                    'take_profit': order.tp,
+                    'comment': order.comment,
+                    'open_time': datetime.fromtimestamp(order.time_setup).isoformat()
+                })
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error getting orders: {e}")
+            return []
+
+    def get_order_count(self) -> int:
+        """Get the number of pending orders."""
+        try:
+            orders = mt5.orders_get()
+            return len(orders) if orders else 0
+        except Exception as e:
+            logger.error(f"Error getting order count: {e}")
+            return 0
+
+    def _order_type_to_string(self, order_type: int) -> str:
+        """Convert MT5 order type to string."""
+        type_map = {
+            mt5.ORDER_TYPE_BUY: "buy",
+            mt5.ORDER_TYPE_SELL: "sell",
+            mt5.ORDER_TYPE_BUY_LIMIT: "buy_limit",
+            mt5.ORDER_TYPE_SELL_LIMIT: "sell_limit",
+            mt5.ORDER_TYPE_BUY_STOP: "buy_stop",
+            mt5.ORDER_TYPE_SELL_STOP: "sell_stop",
+            mt5.ORDER_TYPE_BUY_STOP_LIMIT: "buy_stop_limit",
+            mt5.ORDER_TYPE_SELL_STOP_LIMIT: "sell_stop_limit"
+        }
+        return type_map.get(order_type, f"unknown_{order_type}")
+
 # Initialize MT5 bridge
 mt5_bridge = MT5Bridge()
 
@@ -786,6 +836,21 @@ def get_account():
     except Exception as e:
         logger.error(f"Error in get_account endpoint: {e}")
         return jsonify({'connected': False}), 500
+
+@app.route('/orders', methods=['GET'])
+def get_orders():
+    """Get all pending orders."""
+    orders = mt5_bridge.get_orders()
+    return jsonify(orders)
+
+@app.route('/order-count', methods=['GET'])
+def get_order_count():
+    """Get the number of pending orders."""
+    count = mt5_bridge.get_order_count()
+    return jsonify({
+        'count': count,
+        'timestamp': datetime.now().isoformat()
+    })
 
 def main():
     """Main entry point for the MT5 bridge server."""

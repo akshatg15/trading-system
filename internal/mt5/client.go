@@ -68,6 +68,19 @@ type TradeResponse struct {
 	TP2Ticket            int64   `json:"tp2_ticket,omitempty"`           // TP2 position ticket
 }
 
+// OrderInfo represents pending order information
+type OrderInfo struct {
+	Ticket     int64   `json:"ticket"`
+	Symbol     string  `json:"symbol"`
+	Volume     float64 `json:"volume"`
+	Type       string  `json:"type"`        // "buy_limit", "sell_limit", etc.
+	Price      float64 `json:"price"`
+	StopLoss   float64 `json:"stop_loss"`
+	TakeProfit float64 `json:"take_profit"`
+	Comment    string  `json:"comment"`
+	OpenTime   string  `json:"open_time"`
+}
+
 // PositionInfo represents current position information
 type PositionInfo struct {
 	Ticket     int64   `json:"ticket"`
@@ -269,4 +282,67 @@ func (c *Client) IsConnected(ctx context.Context) bool {
 	defer resp.Body.Close()
 
 	return resp.StatusCode == http.StatusOK
+}
+
+// GetOrders retrieves all pending orders
+func (c *Client) GetOrders(ctx context.Context) ([]*OrderInfo, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+"/orders", nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("HTTP request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("MT5 bridge returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var orders []*OrderInfo
+	if err := json.Unmarshal(body, &orders); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal orders: %w", err)
+	}
+
+	return orders, nil
+}
+
+// GetOrderCount retrieves the number of pending orders efficiently
+func (c *Client) GetOrderCount(ctx context.Context) (int, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+"/order-count", nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("HTTP request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("MT5 bridge returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var countResp struct {
+		Count     int    `json:"count"`
+		Timestamp string `json:"timestamp"`
+	}
+	if err := json.Unmarshal(body, &countResp); err != nil {
+		return 0, fmt.Errorf("failed to unmarshal order count: %w", err)
+	}
+
+	return countResp.Count, nil
 } 

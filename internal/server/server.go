@@ -39,6 +39,7 @@ func (s *Server) Router() http.Handler {
 	mux.HandleFunc("/webhook/tradingview", s.handleTradingViewWebhook)
 	mux.HandleFunc("/trades", s.handleGetTrades)
 	mux.HandleFunc("/positions", s.handleGetPositions)
+	mux.HandleFunc("/orders", s.handleGetOrders)
 	mux.HandleFunc("/mt5/status", s.handleMT5Status)
 	return mux
 }
@@ -147,6 +148,25 @@ func (s *Server) handleGetPositions(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(positions)
+}
+
+func (s *Server) handleGetOrders(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Get pending orders from MT5 via signal processor
+	mt5Client := s.signalProcessor.GetMT5Client()
+	orders, err := mt5Client.GetOrders(r.Context())
+	if err != nil {
+		log.Printf("Error getting MT5 orders: %v", err)
+		http.Error(w, "Failed to get orders", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(orders)
 }
 
 func (s *Server) handleMT5Status(w http.ResponseWriter, r *http.Request) {

@@ -23,4 +23,9 @@ CREATE INDEX IF NOT EXISTS idx_trades_trade_type ON trades(trade_type);
 UPDATE trades SET trade_type = 'entry' WHERE trade_type IS NULL;
 
 -- Add constraint to ensure trade_type is never null
-ALTER TABLE trades ALTER COLUMN trade_type SET NOT NULL; 
+ALTER TABLE trades ALTER COLUMN trade_type SET NOT NULL;
+
+-- Update status constraint to include 'cancelled' status
+ALTER TABLE trades DROP CONSTRAINT IF EXISTS trades_status_check;
+ALTER TABLE trades ADD CONSTRAINT trades_status_check 
+    CHECK (status IN ('pending', 'filled', 'partial', 'rejected', 'cancelled', 'closed')); 

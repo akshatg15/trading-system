@@ -193,10 +193,13 @@ func (p *Processor) processTradingViewSignal(ctx context.Context, signal *databa
 	// Only proceed with TP orders if entry was successful
 	log.Printf("Entry trade %d successfully executed, creating TP orders...", entryTrade.ID)
 
+	// Add a small delay to ensure MT5 processes the entry trade before creating TP orders
+	time.Sleep(500 * time.Millisecond)
+
 	// Create and execute TP1 order if available
 	if signal.TP1 != nil && *signal.TP1 > 0 {
 		tp1Volume := totalVolume / 2 // 50% for TP1
-		tp1Trade, err := p.createTPTrade(ctx, signal, entryTrade.ID, "tp1", *signal.TP1, tp1Volume)
+		tp1Trade, err := p.createTPTradeWithRetry(ctx, signal, entryTrade.ID, "tp1", *signal.TP1, tp1Volume)
 		if err != nil {
 			log.Printf("Failed to create TP1 trade: %v", err)
 		} else {
@@ -215,7 +218,7 @@ func (p *Processor) processTradingViewSignal(ctx context.Context, signal *databa
 	// Create and execute TP2 order if available
 	if signal.TP2 != nil && *signal.TP2 > 0 {
 		tp2Volume := totalVolume / 2 // 50% for TP2
-		tp2Trade, err := p.createTPTrade(ctx, signal, entryTrade.ID, "tp2", *signal.TP2, tp2Volume)
+		tp2Trade, err := p.createTPTradeWithRetry(ctx, signal, entryTrade.ID, "tp2", *signal.TP2, tp2Volume)
 		if err != nil {
 			log.Printf("Failed to create TP2 trade: %v", err)
 		} else {
@@ -481,16 +484,27 @@ func (p *Processor) syncPositionsFromMT5(ctx context.Context) error {
 		return fmt.Errorf("failed to get open trades: %w", err)
 	}
 
-	// Get positions from MT5
+	// Get both positions and pending orders from MT5
 	positions, err := p.mt5Client.GetPositions(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get positions from MT5: %w", err)
 	}
 
-	// Create map of MT5 tickets for quick lookup
+	orders, err := p.mt5Client.GetOrders(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get orders from MT5: %w", err)
+	}
+
+	// Create maps for quick lookup - positions are executed trades
 	mt5Tickets := make(map[int64]*mt5.PositionInfo)
 	for _, pos := range positions {
 		mt5Tickets[pos.Ticket] = pos
+	}
+
+	// Create maps for pending orders
+	mt5OrderTickets := make(map[int64]*mt5.OrderInfo)
+	for _, order := range orders {
+		mt5OrderTickets[order.Ticket] = order
 	}
 
 	// Update trades with current MT5 data
@@ -499,6 +513,7 @@ func (p *Processor) syncPositionsFromMT5(ctx context.Context) error {
 			continue
 		}
 
+		// Check if this is a position (executed trade)
 		if pos, exists := mt5Tickets[*trade.MT5Ticket]; exists {
 			// Position still exists in MT5, update current data
 			updateReq := &database.UpdateTradeStatusRequest{
@@ -512,10 +527,35 @@ func (p *Processor) syncPositionsFromMT5(ctx context.Context) error {
 			if err := p.db.UpdateTradeStatus(ctx, trade.ID, updateReq); err != nil {
 				log.Printf("Failed to update trade %d: %v", trade.ID, err)
 			}
+		} else if order, exists := mt5OrderTickets[*trade.MT5Ticket]; exists {
+			// This is a pending order (limit order not yet executed)
+			// Keep status as "pending" and update price if needed
+			updateReq := &database.UpdateTradeStatusRequest{
+				Status: "pending", // Keep as pending
+			}
+
+			// Update price if available
+			if order.Price > 0 {
+				updateReq.EntryPrice = &order.Price
+			}
+
+			if err := p.db.UpdateTradeStatus(ctx, trade.ID, updateReq); err != nil {
+				log.Printf("Failed to update pending trade %d: %v", trade.ID, err)
+			}
 		} else {
-			// Position no longer exists in MT5, mark as closed
-			log.Printf("Trade %d (MT5 ticket %d) no longer exists in MT5, marking as closed", trade.ID, *trade.MT5Ticket)
-			p.updateTradeStatus(ctx, trade.ID, "closed", nil)
+			// Neither position nor pending order exists - now it's truly closed
+			// This could mean: 1) Order was cancelled, 2) Order was filled and position was closed
+			// Only mark as closed if it was previously filled, or if it's an older trade
+			
+			if trade.Status == "filled" {
+				// Position was closed
+				log.Printf("Trade %d (MT5 ticket %d) position no longer exists in MT5, marking as closed", trade.ID, *trade.MT5Ticket)
+				p.updateTradeStatus(ctx, trade.ID, "closed", nil)
+			} else if trade.Status == "pending" {
+				// Pending order was removed/cancelled
+				log.Printf("Trade %d (MT5 ticket %d) pending order no longer exists in MT5, marking as cancelled", trade.ID, *trade.MT5Ticket)
+				p.updateTradeStatus(ctx, trade.ID, "cancelled", nil)
+			}
 		}
 	}
 
@@ -904,4 +944,28 @@ func (p *Processor) parseSimpleFormat(data string) (*database.CreateSignalReques
 		safeFloatValue(req.TP2))
 
 	return req, nil
+}
+
+// createTPTradeWithRetry creates a TP trade with retry logic to handle database connection issues
+func (p *Processor) createTPTradeWithRetry(ctx context.Context, signal *database.Signal, parentTradeID int, tpType string, tpPrice float64, volume float64) (*database.Trade, error) {
+	maxRetries := 3
+	var lastErr error
+	
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			// Wait a bit between retries
+			time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
+			log.Printf("Retrying TP trade creation, attempt %d/%d", attempt+1, maxRetries)
+		}
+		
+		trade, err := p.createTPTrade(ctx, signal, parentTradeID, tpType, tpPrice, volume)
+		if err == nil {
+			return trade, nil
+		}
+		
+		lastErr = err
+		log.Printf("Failed to create TP trade (attempt %d/%d): %v", attempt+1, maxRetries, err)
+	}
+	
+	return nil, fmt.Errorf("failed to create TP trade after %d attempts: %w", maxRetries, lastErr)
 }
