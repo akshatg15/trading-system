@@ -1,14 +1,49 @@
 //@version=5
 strategy("Manipulation Candle Entry - Partial TP + Plotting", overlay=true)
 
+// === Input Parameters ===
+volumeSize = input.float(0.01, "Trade Volume Size", minval=0.001, maxval=100, step=0.001, tooltip="Volume/lot size for trades")
 testShort = input.bool(false, "Trigger Short Alert Now")
+debugMode = input.bool(false, "Debug Mode - Show Alert Messages", tooltip="When enabled, shows alert messages on chart for debugging")
 
 // Wrap timestamp in double quotes
 getTimestampStr() =>
     '"' + str.tostring(time) + '"'
 
+// Create properly escaped JSON string
+createAlertMessage(action, entry, sl, tp1, tp2) =>
+    ticker = str.replace_all(syminfo.ticker, '"', '\\"')  // Escape any quotes in ticker
+    ticker := str.replace_all(ticker, '\\', '\\\\')       // Escape backslashes
+    
+    // Ensure numeric values are properly formatted (avoid scientific notation)
+    entryStr = str.tostring(math.round(entry, 5))
+    slStr = str.tostring(math.round(sl, 5))
+    tp1Str = str.tostring(math.round(tp1, 5))
+    tp2Str = str.tostring(math.round(tp2, 5))
+    volumeStr = str.tostring(math.round(volumeSize, 3))
+    
+    jsonStr = '{"ticker":"' + ticker + '","action":"' + action + '","entry":' + entryStr + ',"stop_loss":' + slStr + ',"tp1":' + tp1Str + ',"tp2":' + tp2Str + ',"volume":' + volumeStr + ',"timestamp":' + getTimestampStr() + '}'
+    
+    // Debug output if enabled
+    if debugMode
+        label.new(bar_index, high + (high-low)*0.1, jsonStr, style=label.style_label_down, color=color.yellow, textcolor=color.black, size=size.small)
+    
+    jsonStr
+
+// Alternative simple format (use if JSON continues to have issues)
+createSimpleAlertMessage(action, entry, sl, tp1, tp2) =>
+    ticker = syminfo.ticker
+    entryStr = str.tostring(math.round(entry, 5))
+    slStr = str.tostring(math.round(sl, 5))
+    tp1Str = str.tostring(math.round(tp1, 5))
+    tp2Str = str.tostring(math.round(tp2, 5))
+    volumeStr = str.tostring(math.round(volumeSize, 3))
+    timestampStr = str.tostring(time)
+    
+    ticker + "|" + action + "|" + entryStr + "|" + slStr + "|" + tp1Str + "|" + tp2Str + "|" + volumeStr + "|" + timestampStr
+
 if testShort
-    alertMsg = '{ "ticker":"'+syminfo.ticker+'", "action":"sell", "entry":'+str.tostring(close)+', "stop_loss":'+str.tostring(high)+', "tp1":'+str.tostring(close - (high - close))+', "tp2":'+str.tostring(close - 2 * (high - close))+', "timestamp":'+getTimestampStr()+' }'
+    alertMsg = createAlertMessage("sell", close, high, close - (high - close), close - 2 * (high - close))
     alert(alertMsg, alert.freq_once_per_bar)
 
 // === Manipulation Candle Detection ===
@@ -43,7 +78,7 @@ if enterLong and not inTrade
     tradeSide := "long"
     inTrade := true
     
-    alert_message = '{ "ticker":"'+syminfo.ticker+'", "action":"buy", "entry":'+str.tostring(entryPrice)+', "stop_loss":'+str.tostring(stopLoss)+', "tp1":'+str.tostring(takeProfit1)+', "tp2":'+str.tostring(takeProfit2)+', "volume":0.01, "timestamp":'+getTimestampStr()+' }'
+    alert_message = createAlertMessage("buy", entryPrice, stopLoss, takeProfit1, takeProfit2)
     strategy.entry("Long", strategy.long, alert_message=alert_message)
     strategy.exit("TP1", from_entry="Long", limit=takeProfit1, stop=stopLoss, qty_percent=50)
     strategy.exit("TP2", from_entry="Long", limit=takeProfit2, stop=stopLoss)
@@ -58,7 +93,7 @@ if enterShort and not inTrade
     tradeSide := "short"
     inTrade := true
     
-    alert_message = '{ "ticker":"'+syminfo.ticker+'", "action":"sell", "entry":'+str.tostring(entryPrice)+', "stop_loss":'+str.tostring(stopLoss)+', "tp1":'+str.tostring(takeProfit1)+', "tp2":'+str.tostring(takeProfit2)+', "volume":0.01, "timestamp":'+getTimestampStr()+' }'
+    alert_message = createAlertMessage("sell", entryPrice, stopLoss, takeProfit1, takeProfit2)
     strategy.entry("Short", strategy.short, alert_message=alert_message)
     strategy.exit("TP1", from_entry="Short", limit=takeProfit1, stop=stopLoss, qty_percent=50)
     strategy.exit("TP2", from_entry="Short", limit=takeProfit2, stop=stopLoss)

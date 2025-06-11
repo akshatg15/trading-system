@@ -34,6 +34,7 @@ type Trade struct {
 	UUID           uuid.UUID        `json:"uuid" db:"uuid"`
 	SignalID       *int             `json:"signal_id,omitempty" db:"signal_id"`
 	ParentSignalID *int             `json:"parent_signal_id,omitempty" db:"parent_signal_id"`
+	ParentTradeID  *int             `json:"parent_trade_id,omitempty" db:"parent_trade_id"`
 	TradeType      string           `json:"trade_type" db:"trade_type"`
 	Symbol         string           `json:"symbol" db:"symbol"`
 	OrderType      string           `json:"order_type" db:"order_type"`
@@ -114,6 +115,7 @@ type CreateSignalRequest struct {
 type CreateTradeRequest struct {
 	SignalID       *int     `json:"signal_id,omitempty"`
 	ParentSignalID *int     `json:"parent_signal_id,omitempty"`
+	ParentTradeID  *int     `json:"parent_trade_id,omitempty"`
 	TradeType      string   `json:"trade_type"`
 	Symbol         string   `json:"symbol"`
 	OrderType      string   `json:"order_type"`

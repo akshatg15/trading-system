@@ -61,11 +61,21 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("error loading .env file: %w", err)
 	}
 
+	// Fix for PostgreSQL prepared statement issue - add default_query_exec_mode=simple_protocol
+	databaseURL := getEnv("DATABASE_URL", "")
+	if databaseURL != "" && !strings.Contains(databaseURL, "default_query_exec_mode=simple_protocol") {
+		separator := "?"
+		if strings.Contains(databaseURL, "?") {
+			separator = "&"
+		}
+		databaseURL = databaseURL + separator + "default_query_exec_mode=simple_protocol"
+	}
+
 	config := &Config{
 		Database: DatabaseConfig{
-			URL:             getEnv("DATABASE_URL", ""),
-			MaxConnections:  getEnvInt("DB_MAX_CONNECTIONS", 10),
-			ConnMaxLifetime: getEnvInt("DB_CONN_MAX_LIFETIME", 60),
+			URL:             databaseURL,
+			MaxConnections:  getEnvInt("DB_MAX_CONNECTIONS", 5),    // Reduced from 10 for stability
+			ConnMaxLifetime: getEnvInt("DB_CONN_MAX_LIFETIME", 30), // Reduced from 60 for better connection cycling
 		},
 		Server: ServerConfig{
 			Port:          getEnv("SERVER_PORT", "8081"),

@@ -133,9 +133,9 @@ func (db *DB) MarkSignalProcessed(ctx context.Context, signalID int) error {
 // CreateTrade inserts a new trade into the database
 func (db *DB) CreateTrade(ctx context.Context, req *CreateTradeRequest) (*Trade, error) {
 	query := `
-		INSERT INTO trades (signal_id, parent_signal_id, trade_type, symbol, order_type, direction, volume, entry_price, stop_loss, take_profit, tp1, tp2, sl1, sl2)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-		RETURNING id, uuid, signal_id, parent_signal_id, trade_type, symbol, order_type, direction, volume, entry_price,
+		INSERT INTO trades (signal_id, parent_signal_id, parent_trade_id, trade_type, symbol, order_type, direction, volume, entry_price, stop_loss, take_profit, tp1, tp2, sl1, sl2)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+		RETURNING id, uuid, signal_id, parent_signal_id, parent_trade_id, trade_type, symbol, order_type, direction, volume, entry_price,
 		          current_price, stop_loss, take_profit, tp1, tp2, sl1, sl2, status, mt5_ticket, mt5_response,
 		          profit_loss, commission, swap, created_at, updated_at, closed_at
 	`
@@ -143,10 +143,10 @@ func (db *DB) CreateTrade(ctx context.Context, req *CreateTradeRequest) (*Trade,
 	trade := &Trade{}
 	err := db.conn.QueryRowContext(
 		ctx, query,
-		req.SignalID, req.ParentSignalID, req.TradeType, req.Symbol, req.OrderType, req.Direction, req.Volume,
+		req.SignalID, req.ParentSignalID, req.ParentTradeID, req.TradeType, req.Symbol, req.OrderType, req.Direction, req.Volume,
 		req.EntryPrice, req.StopLoss, req.TakeProfit, req.TP1, req.TP2, req.SL1, req.SL2,
 	).Scan(
-		&trade.ID, &trade.UUID, &trade.SignalID, &trade.ParentSignalID, &trade.TradeType, &trade.Symbol, &trade.OrderType,
+		&trade.ID, &trade.UUID, &trade.SignalID, &trade.ParentSignalID, &trade.ParentTradeID, &trade.TradeType, &trade.Symbol, &trade.OrderType,
 		&trade.Direction, &trade.Volume, &trade.EntryPrice, &trade.CurrentPrice,
 		&trade.StopLoss, &trade.TakeProfit, &trade.TP1, &trade.TP2, &trade.SL1, &trade.SL2, &trade.Status, &trade.MT5Ticket,
 		&trade.MT5Response, &trade.ProfitLoss, &trade.Commission, &trade.Swap,
@@ -256,7 +256,7 @@ func (db *DB) UpdateTradeStatus(ctx context.Context, tradeID int, req *UpdateTra
 // GetOpenTrades retrieves all open trades
 func (db *DB) GetOpenTrades(ctx context.Context) ([]*Trade, error) {
 	query := `
-		SELECT id, uuid, signal_id, parent_signal_id, trade_type, symbol, order_type, direction, volume, entry_price,
+		SELECT id, uuid, signal_id, parent_signal_id, parent_trade_id, trade_type, symbol, order_type, direction, volume, entry_price,
 		       current_price, stop_loss, take_profit, tp1, tp2, sl1, sl2, status, mt5_ticket, mt5_response,
 		       profit_loss, commission, swap, created_at, updated_at, closed_at
 		FROM trades 
@@ -274,7 +274,7 @@ func (db *DB) GetOpenTrades(ctx context.Context) ([]*Trade, error) {
 	for rows.Next() {
 		trade := &Trade{}
 		err := rows.Scan(
-			&trade.ID, &trade.UUID, &trade.SignalID, &trade.ParentSignalID, &trade.TradeType, &trade.Symbol, &trade.OrderType,
+			&trade.ID, &trade.UUID, &trade.SignalID, &trade.ParentSignalID, &trade.ParentTradeID, &trade.TradeType, &trade.Symbol, &trade.OrderType,
 			&trade.Direction, &trade.Volume, &trade.EntryPrice, &trade.CurrentPrice,
 			&trade.StopLoss, &trade.TakeProfit, &trade.TP1, &trade.TP2, &trade.SL1, &trade.SL2, &trade.Status, &trade.MT5Ticket,
 			&trade.MT5Response, &trade.ProfitLoss, &trade.Commission, &trade.Swap,
@@ -282,6 +282,42 @@ func (db *DB) GetOpenTrades(ctx context.Context) ([]*Trade, error) {
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan trade: %w", err)
+		}
+		trades = append(trades, trade)
+	}
+
+	return trades, nil
+}
+
+// GetTradesByParent retrieves all child trades for a given parent trade ID
+func (db *DB) GetTradesByParent(ctx context.Context, parentTradeID int) ([]*Trade, error) {
+	query := `
+		SELECT id, uuid, signal_id, parent_signal_id, parent_trade_id, trade_type, symbol, order_type, direction, volume, entry_price,
+		       current_price, stop_loss, take_profit, tp1, tp2, sl1, sl2, status, mt5_ticket, mt5_response,
+		       profit_loss, commission, swap, created_at, updated_at, closed_at
+		FROM trades 
+		WHERE parent_trade_id = $1
+		ORDER BY created_at ASC
+	`
+
+	rows, err := db.conn.QueryContext(ctx, query, parentTradeID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query child trades: %w", err)
+	}
+	defer rows.Close()
+
+	var trades []*Trade
+	for rows.Next() {
+		trade := &Trade{}
+		err := rows.Scan(
+			&trade.ID, &trade.UUID, &trade.SignalID, &trade.ParentSignalID, &trade.ParentTradeID, &trade.TradeType, &trade.Symbol, &trade.OrderType,
+			&trade.Direction, &trade.Volume, &trade.EntryPrice, &trade.CurrentPrice,
+			&trade.StopLoss, &trade.TakeProfit, &trade.TP1, &trade.TP2, &trade.SL1, &trade.SL2, &trade.Status, &trade.MT5Ticket,
+			&trade.MT5Response, &trade.ProfitLoss, &trade.Commission, &trade.Swap,
+			&trade.CreatedAt, &trade.UpdatedAt, &trade.ClosedAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan child trade: %w", err)
 		}
 		trades = append(trades, trade)
 	}

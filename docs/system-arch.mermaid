@@ -1,0 +1,81 @@
+graph TB
+    subgraph "External Sources"
+        TV[TradingView Pine Script]
+        CF[Cloudflare Worker<br/>Optional Production]
+    end
+    
+    subgraph "VPS Infrastructure"
+        subgraph "Go Trading Engine :8081"
+            WH[Webhook Handler<br/>/webhook/tradingview]
+            SP[Signal Processor<br/>2s Loop]
+            PM[Position Monitor<br/>10s Loop]
+            API[REST API<br/>/health /trades /positions]
+        end
+        
+        subgraph "MT5 Bridge :8080"
+            FB[Flask Bridge]
+            SM[State Manager]
+            MT5C[MT5 Client]
+        end
+        
+        subgraph "Database Layer"
+            PG[(PostgreSQL<br/>Neon Cloud)]
+            SIG[Signals Table]
+            TRD[Trades Table]
+            LOG[System Logs]
+            RISK[Risk Events]
+        end
+        
+        subgraph "MetaTrader 5"
+            MT5[MT5 Terminal]
+            EA[Expert Advisor<br/>Alternative]
+        end
+    end
+    
+    %% Webhook Flow
+    TV -->|JSON Webhook| WH
+    CF -->|Global Relay| WH
+    WH -->|Parse & Validate| SIG
+    SIG -->|Store Signal| PG
+    
+    %% Signal Processing Flow
+    SP -->|Query Unprocessed| SIG
+    SP -->|Risk Validation| RISK
+    SP -->|Create Entry Trade| TRD
+    SP -->|Create TP1 Trade| TRD
+    SP -->|Create TP2 Trade| TRD
+    TRD -->|Store Trades| PG
+    
+    %% MT5 Execution Flow
+    SP -->|HTTP Request| FB
+    FB -->|Trade Execution| MT5C
+    MT5C -->|MetaTrader5 API| MT5
+    MT5 -->|Response| MT5C
+    MT5C -->|Status Update| FB
+    FB -->|JSON Response| SP
+    SP -->|Update Status| TRD
+    
+    %% Position Monitoring
+    PM -->|Sync Positions| FB
+    FB -->|Get Positions| MT5
+    MT5 -->|Live Data| SM
+    SM -->|State Sync| PM
+    PM -->|Update P&L| TRD
+    
+    %% Alternative EA Path
+    TV -.->|Direct Webhook| EA
+    EA -.->|Built-in HTTP| MT5
+    
+    %% API Access
+    API -->|Query Data| PG
+    
+    %% Styling
+    classDef external fill:#e1f5fe
+    classDef processing fill:#f3e5f5
+    classDef storage fill:#e8f5e8
+    classDef mt5 fill:#fff3e0
+    
+    class TV,CF external
+    class WH,SP,PM,API,FB,SM processing
+    class PG,SIG,TRD,LOG,RISK storage
+    class MT5C,MT5,EA mt5

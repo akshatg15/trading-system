@@ -321,12 +321,12 @@ class MT5Bridge:
             
             action = trade_data.get('action')  # 'buy', 'sell', 'close'
             volume = float(trade_data.get('volume', 0.01))
-            order_type = trade_data.get('order_type', 'market')
+            order_type = trade_data.get('order_type', 'market')  # 'market' or 'limit'
             price = trade_data.get('price', 0.0)
             stop_loss = trade_data.get('stop_loss', 0.0)
             take_profit = trade_data.get('take_profit', 0.0)
-            tp1 = trade_data.get('tp1', 0.0)
-            tp2 = trade_data.get('tp2', 0.0)
+            tp1 = trade_data.get('tp1', 0.0)  # Not used in simplified version
+            tp2 = trade_data.get('tp2', 0.0)  # Not used in simplified version
             comment = trade_data.get('comment', 'AutoTrader')
             magic = trade_data.get('magic', 123456)
             
@@ -436,50 +436,11 @@ class MT5Bridge:
                         tp2 = current_price - min_stop_distance
                         logger.warning(f"Adjusted TP2 to minimum distance: {tp2}")
             
-            # Calculate volumes for partial take profits
-            total_volume = volume
+            # Execute single position as requested (no business logic)
+            # Only use take_profit if provided, ignore tp1/tp2 (business logic removed)
+            take_profit_level = take_profit if take_profit > 0 else 0
             
-            # For partial take profits, split into separate positions
-            if tp1 > 0 and tp2 > 0:
-                # Split volume between TP1 and TP2 positions
-                tp1_volume = total_volume * 0.5  # 50% for TP1
-                tp2_volume = total_volume * 0.5  # 50% for TP2
-                
-                logger.info(f"Creating two positions for partial take profits:")
-                logger.info(f"- Position 1: {tp1_volume} lots with TP1={tp1}")
-                logger.info(f"- Position 2: {tp2_volume} lots with TP2={tp2}")
-                
-                # Create first position with TP1
-                result1 = self._execute_single_position(symbol, action, tp1_volume, price, stop_loss, tp1, magic, f"{comment} (TP1)")
-                if not result1['success']:
-                    return result1
-                
-                # Create second position with TP2
-                result2 = self._execute_single_position(symbol, action, tp2_volume, price, stop_loss, tp2, magic + 1, f"{comment} (TP2)")
-                if not result2['success']:
-                    # If second position fails, we should probably close the first one
-                    logger.error("Failed to create second position for TP2, but first position with TP1 is already open")
-                
-                return {
-                    'success': True,
-                    'tickets': [result1['ticket'], result2.get('ticket')],
-                    'volumes': [result1['volume'], result2.get('volume', 0)],
-                    'prices': [result1['price'], result2.get('price', 0)],
-                    'partial_tp_strategy': True,
-                    'tp1_ticket': result1['ticket'],
-                    'tp2_ticket': result2.get('ticket'),
-                    'commission': result1.get('commission', 0) + result2.get('commission', 0),
-                    'swap': 0.0,
-                    'profit': 0.0
-                }
-            
-            elif tp1 > 0:
-                # Single take profit with TP1
-                return self._execute_single_position(symbol, action, total_volume, price, stop_loss, tp1, magic, f"{comment} (TP1)")
-            
-            else:
-                # No take profit or just stop loss
-                return self._execute_single_position(symbol, action, total_volume, price, stop_loss, 0, magic, comment)
+            return self._execute_single_position(symbol, action, volume, price, stop_loss, take_profit_level, magic, comment, order_type)
             
         except Exception as e:
             logger.error(f"Error executing trade: {e}")
@@ -489,22 +450,41 @@ class MT5Bridge:
                 'error_msg': str(e)
             }
     
-    def _execute_single_position(self, symbol: str, action: str, volume: float, price: float, stop_loss: float, take_profit: float, magic: int, comment: str) -> Dict[str, Any]:
-        """Execute a single MT5 position."""
+    def _execute_single_position(self, symbol: str, action: str, volume: float, price: float, stop_loss: float, take_profit: float, magic: int, comment: str, order_type: str = 'market') -> Dict[str, Any]:
+        """Execute a single MT5 position or pending order."""
         try:
-            # Determine order type
-            if action == 'buy':
-                order_type_mt5 = mt5.ORDER_TYPE_BUY
+            # Determine order type and action
+            if order_type == 'limit':
+                # Limit order (pending)
+                if action == 'buy':
+                    order_type_mt5 = mt5.ORDER_TYPE_BUY_LIMIT
+                else:  # sell
+                    order_type_mt5 = mt5.ORDER_TYPE_SELL_LIMIT
+                
+                action_type = mt5.TRADE_ACTION_PENDING
+                # For limit orders, price must be specified
                 if price == 0:
-                    price = mt5.symbol_info_tick(symbol).ask
-            else:  # sell
-                order_type_mt5 = mt5.ORDER_TYPE_SELL
-                if price == 0:
-                    price = mt5.symbol_info_tick(symbol).bid
+                    return {
+                        'success': False,
+                        'error_code': 4000,
+                        'error_msg': 'Price required for limit orders'
+                    }
+            else:
+                # Market order (immediate)
+                if action == 'buy':
+                    order_type_mt5 = mt5.ORDER_TYPE_BUY
+                    if price == 0:
+                        price = mt5.symbol_info_tick(symbol).ask
+                else:  # sell
+                    order_type_mt5 = mt5.ORDER_TYPE_SELL
+                    if price == 0:
+                        price = mt5.symbol_info_tick(symbol).bid
+                
+                action_type = mt5.TRADE_ACTION_DEAL
             
-            # Execute main trade
+            # Prepare order request
             request_dict = {
-                "action": mt5.TRADE_ACTION_DEAL,
+                "action": action_type,
                 "symbol": symbol,
                 "volume": volume,
                 "type": order_type_mt5,
@@ -537,41 +517,57 @@ class MT5Bridge:
                     'error_msg': f'Order failed: {result.comment}, Error: {error}'
                 }
             
-            logger.info(f"Position created successfully:")
-            logger.info(f"- Ticket: {result.order}")
-            logger.info(f"- Volume: {result.volume}")
-            logger.info(f"- Price: {result.price}")
-            
-            # Verify position with state manager
-            max_retries = 5
-            retry_delay = 1
-            position = None
-            
-            for attempt in range(max_retries):
-                self.state_manager.sync_positions()
-                position = self.state_manager.get_position(result.order)
-                if position:
-                    logger.info(f"Position verified in state on attempt {attempt + 1}")
-                    break
-                time.sleep(retry_delay)
-            
-            if not position:
-                logger.error("Position not found after creation")
+            if order_type == 'limit':
+                logger.info(f"Pending order created successfully:")
+                logger.info(f"- Ticket: {result.order}")
+                logger.info(f"- Volume: {result.volume}")
+                logger.info(f"- Price: {result.price}")
+                
                 return {
-                    'success': False,
-                    'error_code': 5000,
-                    'error_msg': 'Position not found after creation'
+                    'success': True,
+                    'ticket': result.order,
+                    'volume': result.volume,
+                    'price': result.price,
+                    'commission': 0.0,
+                    'swap': 0.0,
+                    'profit': 0.0
                 }
-            
-            return {
-                'success': True,
-                'ticket': result.order,
-                'volume': result.volume,
-                'price': result.price,
-                'commission': 0.0,
-                'swap': 0.0,
-                'profit': 0.0
-            }
+            else:
+                logger.info(f"Position created successfully:")
+                logger.info(f"- Ticket: {result.order}")
+                logger.info(f"- Volume: {result.volume}")
+                logger.info(f"- Price: {result.price}")
+                
+                # Verify position with state manager for market orders
+                max_retries = 5
+                retry_delay = 1
+                position = None
+                
+                for attempt in range(max_retries):
+                    self.state_manager.sync_positions()
+                    position = self.state_manager.get_position(result.order)
+                    if position:
+                        logger.info(f"Position verified in state on attempt {attempt + 1}")
+                        break
+                    time.sleep(retry_delay)
+                
+                if not position:
+                    logger.error("Position not found after creation")
+                    return {
+                        'success': False,
+                        'error_code': 5000,
+                        'error_msg': 'Position not found after creation'
+                    }
+                
+                return {
+                    'success': True,
+                    'ticket': result.order,
+                    'volume': result.volume,
+                    'price': result.price,
+                    'commission': 0.0,
+                    'swap': 0.0,
+                    'profit': 0.0
+                }
             
         except Exception as e:
             logger.error(f"Error executing single position: {e}")

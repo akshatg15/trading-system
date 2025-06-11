@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strconv"
+	"strings"
 	"time"
 
 	"trading-system/internal/config"
@@ -103,14 +105,21 @@ func (p *Processor) processUnprocessedSignals(ctx context.Context) error {
 	log.Printf("Processing %d unprocessed signals", len(signals))
 
 	for _, signal := range signals {
-		if err := p.processSignal(ctx, signal); err != nil {
-			log.Printf("Error processing signal %d: %v", signal.ID, err)
-			continue
+		processErr := p.processSignal(ctx, signal)
+		if processErr != nil {
+			log.Printf("Error processing signal %d: %v", signal.ID, processErr)
 		}
 
-		// Mark signal as processed
+		// Always mark signal as processed after attempting to handle it
+		// This prevents infinite loops when MT5 is unavailable
 		if err := p.db.MarkSignalProcessed(ctx, signal.ID); err != nil {
 			log.Printf("Error marking signal %d as processed: %v", signal.ID, err)
+		} else {
+			if processErr != nil {
+				log.Printf("Signal %d marked as processed despite processing error: %v", signal.ID, processErr)
+			} else {
+				log.Printf("Signal %d successfully processed and marked as completed", signal.ID)
+			}
 		}
 	}
 
@@ -142,6 +151,12 @@ func (p *Processor) processTradingViewSignal(ctx context.Context, signal *databa
 		return p.handleCloseSignal(ctx, signal, &tvWebhook)
 	}
 
+	// Check MT5 connectivity first - don't create trades if not connected
+	if !p.mt5Client.IsConnected(ctx) {
+		log.Printf("MT5 bridge not available - rejecting signal %d", signal.ID)
+		return fmt.Errorf("MT5 bridge not available - cannot execute trades")
+	}
+
 	// Get volume value (handle pointer)
 	requestedVolume := 0.0
 	if tvWebhook.Volume != nil {
@@ -156,10 +171,10 @@ func (p *Processor) processTradingViewSignal(ctx context.Context, signal *databa
 	}
 
 	// Calculate position size
-	volume := p.calculatePositionSize(signal.Symbol, requestedVolume)
+	totalVolume := p.calculatePositionSize(signal.Symbol, requestedVolume)
 
 	// Create entry trade
-	entryTrade, err := p.createEntryTrade(ctx, signal, volume)
+	entryTrade, err := p.createEntryTrade(ctx, signal, totalVolume)
 	if err != nil {
 		return fmt.Errorf("failed to create entry trade: %w", err)
 	}
@@ -167,32 +182,52 @@ func (p *Processor) processTradingViewSignal(ctx context.Context, signal *databa
 	log.Printf("Created entry trade %d for signal %d: %s %s %.2f lots",
 		entryTrade.ID, signal.ID, entryTrade.Direction, entryTrade.Symbol, entryTrade.Volume)
 
-	// Execute entry trade via MT5
-	if err := p.executeTrade(ctx, entryTrade); err != nil {
+	// Execute entry trade via MT5 (no TP levels, just entry with SL)
+	if err := p.executeEntryTrade(ctx, entryTrade); err != nil {
 		log.Printf("Failed to execute entry trade %d: %v", entryTrade.ID, err)
-		// Update trade status but don't return error - signal should still be marked as processed
-		// since the trade record was created successfully
 		p.updateTradeStatus(ctx, entryTrade.ID, "rejected", nil)
 		log.Printf("Trade %d marked as rejected due to execution failure", entryTrade.ID)
-		// Continue with TP trades creation even if entry failed (they'll be in pending state)
+		return fmt.Errorf("entry trade execution failed: %w", err)
 	}
 
-	// Create TP1 and TP2 trades if available
+	// Only proceed with TP orders if entry was successful
+	log.Printf("Entry trade %d successfully executed, creating TP orders...", entryTrade.ID)
+
+	// Create and execute TP1 order if available
 	if signal.TP1 != nil && *signal.TP1 > 0 {
-		tp1Trade, err := p.createTPTrade(ctx, signal, "tp1", *signal.TP1, volume/2) // 50% for TP1
+		tp1Volume := totalVolume / 2 // 50% for TP1
+		tp1Trade, err := p.createTPTrade(ctx, signal, entryTrade.ID, "tp1", *signal.TP1, tp1Volume)
 		if err != nil {
 			log.Printf("Failed to create TP1 trade: %v", err)
 		} else {
 			log.Printf("Created TP1 trade %d for signal %d", tp1Trade.ID, signal.ID)
+
+			// Execute TP1 limit order
+			if err := p.executeTPTrade(ctx, tp1Trade); err != nil {
+				log.Printf("Failed to execute TP1 trade %d: %v", tp1Trade.ID, err)
+				p.updateTradeStatus(ctx, tp1Trade.ID, "rejected", nil)
+			} else {
+				log.Printf("TP1 trade %d successfully placed", tp1Trade.ID)
+			}
 		}
 	}
 
+	// Create and execute TP2 order if available
 	if signal.TP2 != nil && *signal.TP2 > 0 {
-		tp2Trade, err := p.createTPTrade(ctx, signal, "tp2", *signal.TP2, volume/2) // 50% for TP2
+		tp2Volume := totalVolume / 2 // 50% for TP2
+		tp2Trade, err := p.createTPTrade(ctx, signal, entryTrade.ID, "tp2", *signal.TP2, tp2Volume)
 		if err != nil {
 			log.Printf("Failed to create TP2 trade: %v", err)
 		} else {
 			log.Printf("Created TP2 trade %d for signal %d", tp2Trade.ID, signal.ID)
+
+			// Execute TP2 limit order
+			if err := p.executeTPTrade(ctx, tp2Trade); err != nil {
+				log.Printf("Failed to execute TP2 trade %d: %v", tp2Trade.ID, err)
+				p.updateTradeStatus(ctx, tp2Trade.ID, "rejected", nil)
+			} else {
+				log.Printf("TP2 trade %d successfully placed", tp2Trade.ID)
+			}
 		}
 	}
 
@@ -222,10 +257,11 @@ func (p *Processor) createEntryTrade(ctx context.Context, signal *database.Signa
 }
 
 // createTPTrade creates a take profit trade
-func (p *Processor) createTPTrade(ctx context.Context, signal *database.Signal, tpType string, tpPrice float64, volume float64) (*database.Trade, error) {
+func (p *Processor) createTPTrade(ctx context.Context, signal *database.Signal, parentTradeID int, tpType string, tpPrice float64, volume float64) (*database.Trade, error) {
 	tradeReq := &database.CreateTradeRequest{
 		SignalID:       &signal.ID,
-		ParentSignalID: &signal.ID,
+		ParentSignalID: &signal.ID,     // Reference the original signal
+		ParentTradeID:  &parentTradeID, // Reference the parent entry trade
 		TradeType:      tpType,
 		Symbol:         signal.Symbol,
 		OrderType:      "limit",
@@ -262,14 +298,14 @@ func (p *Processor) updateTradeStatus(ctx context.Context, tradeID int, status s
 	}
 }
 
-// executeTrade sends the trade to MT5 for execution
-func (p *Processor) executeTrade(ctx context.Context, trade *database.Trade) error {
+// executeEntryTrade sends the entry trade to MT5 for execution (no TP levels)
+func (p *Processor) executeEntryTrade(ctx context.Context, trade *database.Trade) error {
 	// Check if MT5 is connected
 	if !p.mt5Client.IsConnected(ctx) {
 		return fmt.Errorf("MT5 bridge not available")
 	}
 
-	// Prepare MT5 trade request
+	// Prepare MT5 trade request for entry only
 	mt5Req := &mt5.TradeRequest{
 		Symbol:    trade.Symbol,
 		Action:    trade.Direction,
@@ -284,27 +320,15 @@ func (p *Processor) executeTrade(ctx context.Context, trade *database.Trade) err
 	if trade.StopLoss != nil {
 		mt5Req.StopLoss = *trade.StopLoss
 	}
-	if trade.TakeProfit != nil {
-		mt5Req.TakeProfit = *trade.TakeProfit
-	}
-	
-	// Add TP1 and TP2 if available
-	if trade.TP1 != nil {
-		mt5Req.TP1 = *trade.TP1
-		log.Printf("Setting TP1: %.5f for trade %d", *trade.TP1, trade.ID)
-	}
-	if trade.TP2 != nil {
-		mt5Req.TP2 = *trade.TP2
-		log.Printf("Setting TP2: %.5f for trade %d", *trade.TP2, trade.ID)
-	}
-	
-	log.Printf("Sending trade to MT5: Symbol=%s, Action=%s, Volume=%.2f, TP1=%.5f, TP2=%.5f", 
-		mt5Req.Symbol, mt5Req.Action, mt5Req.Volume, mt5Req.TP1, mt5Req.TP2)
+	// Note: No TakeProfit, TP1, TP2 - these will be separate orders
+
+	log.Printf("Sending entry trade to MT5: Symbol=%s, Action=%s, Volume=%.2f, Price=%.5f, SL=%.5f",
+		mt5Req.Symbol, mt5Req.Action, mt5Req.Volume, mt5Req.Price, mt5Req.StopLoss)
 
 	// Send trade to MT5
 	response, err := p.mt5Client.SendTrade(ctx, mt5Req)
 	if err != nil {
-		return fmt.Errorf("failed to send trade to MT5: %w", err)
+		return fmt.Errorf("failed to send entry trade to MT5: %w", err)
 	}
 
 	// Update trade with MT5 response
@@ -317,26 +341,70 @@ func (p *Processor) executeTrade(ctx context.Context, trade *database.Trade) err
 
 	if response.Success {
 		updateReq.Status = "filled"
-		
-		// Handle both single and multiple ticket responses
-		if response.PartialTPStrategy && len(response.Tickets) > 0 {
-			// For partial TP strategy, use the primary ticket (TP1)
-			updateReq.MT5Ticket = &response.TP1Ticket
-			if len(response.Prices) > 0 {
-				updateReq.EntryPrice = &response.Prices[0]
-			}
-			log.Printf("Trade %d executed with partial TP strategy: TP1 ticket=%d, TP2 ticket=%d", 
-				trade.ID, response.TP1Ticket, response.TP2Ticket)
-		} else {
-			// Single position response
-			if response.Ticket != 0 {
-				updateReq.MT5Ticket = &response.Ticket
-			} else if len(response.Tickets) > 0 {
-				updateReq.MT5Ticket = &response.Tickets[0]
-			}
-			updateReq.EntryPrice = &response.Price
+
+		// Simple single ticket response for entry trades
+		if response.Ticket != 0 {
+			updateReq.MT5Ticket = &response.Ticket
 		}
-		
+		updateReq.EntryPrice = &response.Price
+
+		if response.Commission != 0 {
+			updateReq.Commission = &response.Commission
+		}
+	} else {
+		updateReq.Status = "rejected"
+	}
+
+	return p.db.UpdateTradeStatus(ctx, trade.ID, updateReq)
+}
+
+// executeTPTrade sends a TP trade to MT5 for execution
+func (p *Processor) executeTPTrade(ctx context.Context, trade *database.Trade) error {
+	// Check if MT5 is connected
+	if !p.mt5Client.IsConnected(ctx) {
+		return fmt.Errorf("MT5 bridge not available")
+	}
+
+	// Prepare MT5 trade request for limit order
+	mt5Req := &mt5.TradeRequest{
+		Symbol:    trade.Symbol,
+		Action:    trade.Direction,
+		Volume:    trade.Volume,
+		OrderType: "limit",
+		Price:     *trade.EntryPrice, // TP price for limit order
+	}
+
+	// Add stop loss if available
+	if trade.StopLoss != nil {
+		mt5Req.StopLoss = *trade.StopLoss
+	}
+
+	log.Printf("Sending TP order to MT5: Symbol=%s, Action=%s, Volume=%.2f, Price=%.5f",
+		mt5Req.Symbol, mt5Req.Action, mt5Req.Volume, mt5Req.Price)
+
+	// Send trade to MT5
+	response, err := p.mt5Client.SendTrade(ctx, mt5Req)
+	if err != nil {
+		return fmt.Errorf("failed to send TP trade to MT5: %w", err)
+	}
+
+	// Update trade with MT5 response
+	responseData, _ := json.Marshal(response)
+	responseRaw := json.RawMessage(responseData)
+
+	updateReq := &database.UpdateTradeStatusRequest{
+		MT5Response: &responseRaw,
+	}
+
+	if response.Success {
+		updateReq.Status = "pending" // TP orders start as pending until filled
+
+		if response.Ticket != 0 {
+			updateReq.MT5Ticket = &response.Ticket
+		} else if len(response.Tickets) > 0 {
+			updateReq.MT5Ticket = &response.Tickets[0]
+		}
+
 		if response.Commission != 0 {
 			updateReq.Commission = &response.Commission
 		}
@@ -509,11 +577,11 @@ func (p *Processor) validateRiskParametersFromSignal(ctx context.Context, signal
 			// Fallback to database check
 			return p.validateRiskParametersFromDatabase(ctx, volume)
 		}
-		
+
 		if positionCount >= p.config.Risk.MaxOpenPositions {
 			return fmt.Errorf("maximum open positions reached (%d)", p.config.Risk.MaxOpenPositions)
 		}
-		
+
 		log.Printf("Risk check passed: %d/%d positions open", positionCount, p.config.Risk.MaxOpenPositions)
 	} else {
 		// Fallback to database check if MT5 not available
@@ -580,11 +648,15 @@ func (p *Processor) ProcessWebhook(ctx context.Context, webhookData []byte, sour
 
 // parseTradingViewWebhook parses a TradingView webhook payload
 func (p *Processor) parseTradingViewWebhook(data []byte) (*database.CreateSignalRequest, error) {
+	// First try to parse as JSON
 	var webhook database.TradingViewWebhook
 	if err := json.Unmarshal(data, &webhook); err != nil {
-		return nil, fmt.Errorf("failed to parse TradingView webhook JSON: %w", err)
+		// If JSON parsing fails, try to parse as simple pipe-delimited format
+		// Format: ticker|action|entry|stop_loss|tp1|tp2|volume|timestamp
+		return p.parseSimpleFormat(string(data))
 	}
 
+	// Continue with existing JSON parsing logic
 	// Validate required fields
 	if webhook.Ticker == "" {
 		return nil, fmt.Errorf("ticker is required")
@@ -733,4 +805,103 @@ func safeFloatValue(f *float64) float64 {
 		return 0.0
 	}
 	return *f
+}
+
+// parseSimpleFormat parses pipe-delimited format: ticker|action|entry|stop_loss|tp1|tp2|volume|timestamp
+func (p *Processor) parseSimpleFormat(data string) (*database.CreateSignalRequest, error) {
+	parts := strings.Split(strings.TrimSpace(data), "|")
+	if len(parts) != 8 {
+		return nil, fmt.Errorf("simple format requires 8 parts separated by |, got %d parts", len(parts))
+	}
+
+	ticker := strings.TrimSpace(parts[0])
+	action := strings.TrimSpace(parts[1])
+	entryStr := strings.TrimSpace(parts[2])
+	slStr := strings.TrimSpace(parts[3])
+	tp1Str := strings.TrimSpace(parts[4])
+	tp2Str := strings.TrimSpace(parts[5])
+	volumeStr := strings.TrimSpace(parts[6])
+	timestampStr := strings.TrimSpace(parts[7])
+
+	// Validate required fields
+	if ticker == "" {
+		return nil, fmt.Errorf("ticker is required")
+	}
+	if action == "" {
+		return nil, fmt.Errorf("action is required")
+	}
+	if action != "buy" && action != "sell" && action != "close" {
+		return nil, fmt.Errorf("invalid action: %s, must be buy/sell/close", action)
+	}
+
+	// Parse numeric values
+	parseFloat := func(s, field string) (*float64, error) {
+		if s == "" || s == "0" {
+			return nil, nil
+		}
+		val, err := strconv.ParseFloat(s, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid %s: %s", field, s)
+		}
+		if val <= 0 {
+			return nil, nil
+		}
+		// Round to 8 decimal places to match database precision
+		rounded := float64(int(val*100000000+0.5)) / 100000000
+		return &rounded, nil
+	}
+
+	entry, err := parseFloat(entryStr, "entry")
+	if err != nil {
+		return nil, err
+	}
+
+	stopLoss, err := parseFloat(slStr, "stop_loss")
+	if err != nil {
+		return nil, err
+	}
+
+	tp1, err := parseFloat(tp1Str, "tp1")
+	if err != nil {
+		return nil, err
+	}
+
+	tp2, err := parseFloat(tp2Str, "tp2")
+	if err != nil {
+		return nil, err
+	}
+
+	// Validate TP ordering based on signal direction
+	if tp1 != nil && tp2 != nil {
+		if action == "buy" && *tp2 <= *tp1 {
+			return nil, fmt.Errorf("for buy signals, TP2 (%.5f) must be greater than TP1 (%.5f)", *tp2, *tp1)
+		}
+		if action == "sell" && *tp2 >= *tp1 {
+			return nil, fmt.Errorf("for sell signals, TP2 (%.5f) must be less than TP1 (%.5f)", *tp2, *tp1)
+		}
+	}
+
+	// Create simple payload for storage
+	simplePayload := fmt.Sprintf(`{"ticker":"%s","action":"%s","entry":%s,"stop_loss":%s,"tp1":%s,"tp2":%s,"volume":%s,"timestamp":"%s","format":"simple"}`,
+		ticker, action, entryStr, slStr, tp1Str, tp2Str, volumeStr, timestampStr)
+
+	req := &database.CreateSignalRequest{
+		Source:     "tradingview",
+		Symbol:     ticker,
+		SignalType: action,
+		Price:      entry,
+		StopLoss:   stopLoss,
+		TP1:        tp1,
+		TP2:        tp2,
+		Payload:    []byte(simplePayload),
+	}
+
+	log.Printf("Parsed simple format: Symbol=%s, Action=%s, Entry=%.5f, SL=%.5f, TP1=%.5f, TP2=%.5f",
+		req.Symbol, req.SignalType,
+		safeFloatValue(req.Price),
+		safeFloatValue(req.StopLoss),
+		safeFloatValue(req.TP1),
+		safeFloatValue(req.TP2))
+
+	return req, nil
 }
