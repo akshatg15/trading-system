@@ -767,6 +767,193 @@ class MT5Bridge:
         }
         return type_map.get(order_type, f"unknown_{order_type}")
 
+    def modify_position(self, modify_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Modify an existing position with TP/SL levels or create partial closing orders."""
+        try:
+            # Ensure we're connected
+            if not self.ensure_connected():
+                return {
+                    'success': False,
+                    'error_code': 5001,
+                    'error_msg': 'MT5 not connected'
+                }
+            
+            position_ticket = modify_data.get('position_ticket')
+            symbol = modify_data.get('symbol')
+            take_profit = modify_data.get('take_profit', 0.0)
+            stop_loss = modify_data.get('stop_loss', 0.0) 
+            partial_volume = modify_data.get('partial_volume', 0.0)
+            tp_type = modify_data.get('tp_type', '')
+            
+            if not position_ticket:
+                return {
+                    'success': False,
+                    'error_code': 4000,
+                    'error_msg': 'Position ticket is required'
+                }
+            
+            # Find the position
+            positions = mt5.positions_get(ticket=position_ticket)
+            if not positions:
+                return {
+                    'success': False,
+                    'error_code': 4051,
+                    'error_msg': f'Position {position_ticket} not found'
+                }
+            
+            position = positions[0]
+            
+            # For partial TP orders, create a limit order that will close part of the position
+            if partial_volume > 0 and take_profit > 0:
+                return self._create_partial_tp_order(position, take_profit, partial_volume, tp_type)
+            
+            # For full position modification, modify TP/SL levels
+            return self._modify_position_levels(position, take_profit, stop_loss)
+            
+        except Exception as e:
+            logger.error(f"Error modifying position: {e}")
+            return {
+                'success': False,
+                'error_code': 5000,
+                'error_msg': str(e)
+            }
+    
+    def _create_partial_tp_order(self, position, take_profit: float, volume: float, tp_type: str) -> Dict[str, Any]:
+        """Create a limit order to close part of a position at TP level."""
+        try:
+            # Determine the opposite order type for closing
+            if position.type == mt5.POSITION_TYPE_BUY:
+                order_type = mt5.ORDER_TYPE_SELL_LIMIT
+                action = "sell"
+            else:
+                order_type = mt5.ORDER_TYPE_BUY_LIMIT  
+                action = "buy"
+            
+            # Validate volume doesn't exceed position volume
+            if volume > position.volume:
+                volume = position.volume
+                logger.warning(f"Adjusted TP volume to position volume: {volume}")
+            
+            # Get symbol info for validation
+            symbol_info = mt5.symbol_info(position.symbol)
+            if not symbol_info:
+                return {
+                    'success': False,
+                    'error_code': 4106,
+                    'error_msg': f'Failed to get symbol info for {position.symbol}'
+                }
+            
+            # Validate TP price against current market
+            current_price = mt5.symbol_info_tick(position.symbol).bid if position.type == mt5.POSITION_TYPE_BUY else mt5.symbol_info_tick(position.symbol).ask
+            min_distance = symbol_info.trade_stops_level * symbol_info.point
+            
+            if position.type == mt5.POSITION_TYPE_BUY:
+                if take_profit <= current_price + min_distance:
+                    take_profit = current_price + min_distance
+                    logger.warning(f"Adjusted TP price to minimum distance: {take_profit}")
+            else:
+                if take_profit >= current_price - min_distance:
+                    take_profit = current_price - min_distance
+                    logger.warning(f"Adjusted TP price to minimum distance: {take_profit}")
+            
+            # Create limit order request
+            request_dict = {
+                "action": mt5.TRADE_ACTION_PENDING,
+                "symbol": position.symbol,
+                "volume": volume,
+                "type": order_type,
+                "price": take_profit,
+                "magic": position.magic,
+                "comment": f"TP_{tp_type}_{position.ticket}",
+                "type_time": mt5.ORDER_TIME_GTC,
+                "type_filling": mt5.ORDER_FILLING_IOC,
+            }
+            
+            logger.info(f"Creating partial TP order: {request_dict}")
+            
+            # Send the order
+            result = mt5.order_send(request_dict)
+            
+            if result.retcode != mt5.TRADE_RETCODE_DONE:
+                error = mt5.last_error()
+                logger.error(f"TP order failed: {result.comment}, Error: {error}")
+                return {
+                    'success': False,
+                    'error_code': result.retcode,
+                    'error_msg': f'TP order failed: {result.comment}, Error: {error}'
+                }
+            
+            logger.info(f"Partial TP order created successfully:")
+            logger.info(f"- TP Order Ticket: {result.order}")
+            logger.info(f"- Volume: {result.volume}")
+            logger.info(f"- TP Price: {result.price}")
+            
+            return {
+                'success': True,
+                'tp_order_ticket': result.order,
+                'volume': result.volume,
+                'price': result.price,
+                'commission': 0.0
+            }
+            
+        except Exception as e:
+            logger.error(f"Error creating partial TP order: {e}")
+            return {
+                'success': False,
+                'error_code': 5000,
+                'error_msg': str(e)
+            }
+    
+    def _modify_position_levels(self, position, take_profit: float, stop_loss: float) -> Dict[str, Any]:
+        """Modify the TP/SL levels of an existing position."""
+        try:
+            # Use the existing TP/SL if not provided
+            new_tp = take_profit if take_profit > 0 else position.tp
+            new_sl = stop_loss if stop_loss > 0 else position.sl
+            
+            # Create modification request
+            request_dict = {
+                "action": mt5.TRADE_ACTION_SLTP,
+                "symbol": position.symbol,
+                "position": position.ticket,
+                "sl": new_sl,
+                "tp": new_tp,
+                "magic": position.magic,
+                "comment": f"Modify_{position.ticket}",
+                "type_time": mt5.ORDER_TIME_GTC,
+                "type_filling": mt5.ORDER_FILLING_IOC,
+            }
+            
+            logger.info(f"Modifying position levels: {request_dict}")
+            
+            # Send the modification
+            result = mt5.order_send(request_dict)
+            
+            if result.retcode != mt5.TRADE_RETCODE_DONE:
+                error = mt5.last_error()
+                logger.error(f"Position modification failed: {result.comment}, Error: {error}")
+                return {
+                    'success': False,
+                    'error_code': result.retcode,
+                    'error_msg': f'Position modification failed: {result.comment}, Error: {error}'
+                }
+            
+            logger.info(f"Position levels modified successfully for ticket: {position.ticket}")
+            
+            return {
+                'success': True,
+                'tp_order_ticket': 0,  # No separate order ticket for SL/TP modification
+                'commission': 0.0
+            }
+            
+        except Exception as e:
+            logger.error(f"Error modifying position levels: {e}")
+            return {
+                'success': False,
+                'error_code': 5000,
+                'error_msg': str(e)
+            }
+
 # Initialize MT5 bridge
 mt5_bridge = MT5Bridge()
 
@@ -817,7 +1004,39 @@ def get_positions():
     positions = mt5_bridge.get_positions()
     return jsonify(positions)
 
-@app.route('/position-count', methods=['GET'])
+@app.route('/position/modify', methods=['POST'])
+def modify_position():
+    """Modify an existing position with TP/SL levels."""
+    try:
+        if not mt5_bridge.ensure_connected():
+            return jsonify({
+                'success': False,
+                'error_code': 5001,
+                'error_msg': 'MT5 not connected'
+            }), 503
+        
+        modify_data = request.get_json()
+        if not modify_data:
+            return jsonify({
+                'success': False,
+                'error_code': 4000,
+                'error_msg': 'Invalid JSON data'
+            }), 400
+        
+        result = mt5_bridge.modify_position(modify_data)
+        status_code = 200 if result['success'] else 400
+        
+        return jsonify(result), status_code
+        
+    except Exception as e:
+        logger.error(f"Error in modify_position endpoint: {e}")
+        return jsonify({
+            'success': False,
+            'error_code': 5000,
+            'error_msg': str(e)
+        }), 500
+
+@app.route('/positions/count', methods=['GET'])
 def get_position_count():
     """Get the number of open positions."""
     count = mt5_bridge.get_position_count()

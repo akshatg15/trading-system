@@ -361,34 +361,51 @@ func (p *Processor) executeEntryTrade(ctx context.Context, trade *database.Trade
 	return p.db.UpdateTradeStatus(ctx, trade.ID, updateReq)
 }
 
-// executeTPTrade sends a TP trade to MT5 for execution
+// executeTPTrade sends a TP trade to MT5 for execution as a position-based closing order
 func (p *Processor) executeTPTrade(ctx context.Context, trade *database.Trade) error {
 	// Check if MT5 is connected
 	if !p.mt5Client.IsConnected(ctx) {
 		return fmt.Errorf("MT5 bridge not available")
 	}
 
-	// Prepare MT5 trade request for limit order
-	mt5Req := &mt5.TradeRequest{
-		Symbol:    trade.Symbol,
-		Action:    trade.Direction,
-		Volume:    trade.Volume,
-		OrderType: "limit",
-		Price:     *trade.EntryPrice, // TP price for limit order
+	// Get the parent entry trade to find the MT5 position ticket
+	if trade.ParentTradeID == nil {
+		return fmt.Errorf("TP trade missing parent trade ID")
 	}
 
-	// Add stop loss if available
-	if trade.StopLoss != nil {
-		mt5Req.StopLoss = *trade.StopLoss
-	}
-
-	log.Printf("Sending TP order to MT5: Symbol=%s, Action=%s, Volume=%.2f, Price=%.5f",
-		mt5Req.Symbol, mt5Req.Action, mt5Req.Volume, mt5Req.Price)
-
-	// Send trade to MT5
-	response, err := p.mt5Client.SendTrade(ctx, mt5Req)
+	parentTrade, err := p.getTradeByID(ctx, *trade.ParentTradeID)
 	if err != nil {
-		return fmt.Errorf("failed to send TP trade to MT5: %w", err)
+		return fmt.Errorf("failed to get parent trade: %w", err)
+	}
+
+	if parentTrade.MT5Ticket == nil {
+		return fmt.Errorf("parent trade missing MT5 ticket")
+	}
+
+	// Verify the parent position still exists
+	if !p.verifyPositionExists(ctx, *parentTrade.MT5Ticket) {
+		log.Printf("Parent position %d no longer exists, skipping TP order", *parentTrade.MT5Ticket)
+		p.updateTradeStatus(ctx, trade.ID, "cancelled", nil)
+		return nil
+	}
+
+	// Create position-based TP order using MT5 PositionModify to set TP level
+	mt5Req := &mt5.PositionModifyRequest{
+		PositionTicket: *parentTrade.MT5Ticket,
+		Symbol:         trade.Symbol,
+		TakeProfit:     *trade.EntryPrice, // TP price level
+		StopLoss:       trade.StopLoss,    // Keep existing SL if any
+		PartialVolume:  trade.Volume,      // Volume to close at this level
+		TPType:         trade.TradeType,   // "tp1" or "tp2"
+	}
+
+	log.Printf("Setting TP level for position %d: Symbol=%s, TP=%.5f, Volume=%.2f, Type=%s",
+		*parentTrade.MT5Ticket, mt5Req.Symbol, mt5Req.TakeProfit, mt5Req.PartialVolume, mt5Req.TPType)
+
+	// Send TP modification request to MT5
+	response, err := p.mt5Client.ModifyPosition(ctx, mt5Req)
+	if err != nil {
+		return fmt.Errorf("failed to set TP level in MT5: %w", err)
 	}
 
 	// Update trade with MT5 response
@@ -400,19 +417,33 @@ func (p *Processor) executeTPTrade(ctx context.Context, trade *database.Trade) e
 	}
 
 	if response.Success {
-		updateReq.Status = "pending" // TP orders start as pending until filled
+		updateReq.Status = "pending" // TP level set, waiting for price to be hit
 
-		if response.Ticket != 0 {
-			updateReq.MT5Ticket = &response.Ticket
-		} else if len(response.Tickets) > 0 {
-			updateReq.MT5Ticket = &response.Tickets[0]
+		// Use the parent position ticket as reference
+		updateReq.MT5Ticket = parentTrade.MT5Ticket
+		
+		// Store the TP level ticket if returned
+		if response.TPOrderTicket != 0 {
+			// Create a JSON object to store TP order details
+			tpDetails := map[string]interface{}{
+				"tp_order_ticket": response.TPOrderTicket,
+				"parent_ticket":   *parentTrade.MT5Ticket,
+				"tp_price":        *trade.EntryPrice,
+				"tp_volume":       trade.Volume,
+			}
+			tpDetailsData, _ := json.Marshal(tpDetails)
+			tpDetailsRaw := json.RawMessage(tpDetailsData)
+			updateReq.MT5Response = &tpDetailsRaw
 		}
 
 		if response.Commission != 0 {
 			updateReq.Commission = &response.Commission
 		}
+
+		log.Printf("TP level %s successfully set for position %d", trade.TradeType, *parentTrade.MT5Ticket)
 	} else {
 		updateReq.Status = "rejected"
+		log.Printf("Failed to set TP level %s for position %d: %s", trade.TradeType, *parentTrade.MT5Ticket, response.ErrorMsg)
 	}
 
 	return p.db.UpdateTradeStatus(ctx, trade.ID, updateReq)
@@ -968,4 +999,30 @@ func (p *Processor) createTPTradeWithRetry(ctx context.Context, signal *database
 	}
 	
 	return nil, fmt.Errorf("failed to create TP trade after %d attempts: %w", maxRetries, lastErr)
+}
+
+// getTradeByID retrieves a trade by its ID
+func (p *Processor) getTradeByID(ctx context.Context, tradeID int) (*database.Trade, error) {
+	return p.db.GetTradeByID(ctx, tradeID)
+}
+
+// verifyPositionExists checks if a position still exists in MT5
+func (p *Processor) verifyPositionExists(ctx context.Context, positionTicket int64) bool {
+	if !p.mt5Client.IsConnected(ctx) {
+		return false
+	}
+	
+	positions, err := p.mt5Client.GetPositions(ctx)
+	if err != nil {
+		log.Printf("Failed to get positions for verification: %v", err)
+		return false
+	}
+	
+	for _, pos := range positions {
+		if pos.Ticket == positionTicket {
+			return true
+		}
+	}
+	
+	return false
 }

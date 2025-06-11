@@ -61,21 +61,42 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("error loading .env file: %w", err)
 	}
 
-	// Fix for PostgreSQL prepared statement issue - add default_query_exec_mode=simple_protocol
+	// Fix for PostgreSQL prepared statement issue - add multiple stability parameters
 	databaseURL := getEnv("DATABASE_URL", "")
-	if databaseURL != "" && !strings.Contains(databaseURL, "default_query_exec_mode=simple_protocol") {
-		separator := "?"
-		if strings.Contains(databaseURL, "?") {
-			separator = "&"
+	if databaseURL != "" {
+		// Parse existing URL parameters
+		urlParts := strings.Split(databaseURL, "?")
+		baseURL := urlParts[0]
+		
+		// Build stabilization parameters
+		stabilityParams := []string{
+			"default_query_exec_mode=simple_protocol",  // Disable prepared statements
+			"pool_max_conn_lifetime=30m",               // Force connection refresh
+			"pool_max_conn_idle_time=5m",               // Reduce idle time
+			"connect_timeout=10",                       // Connection timeout
 		}
-		databaseURL = databaseURL + separator + "default_query_exec_mode=simple_protocol"
+		
+		// Combine with existing parameters
+		if len(urlParts) > 1 {
+			existingParams := urlParts[1]
+			// Check if we already have these parameters
+			for _, param := range stabilityParams {
+				paramKey := strings.Split(param, "=")[0]
+				if !strings.Contains(existingParams, paramKey) {
+					existingParams = existingParams + "&" + param
+				}
+			}
+			databaseURL = baseURL + "?" + existingParams
+		} else {
+			databaseURL = baseURL + "?" + strings.Join(stabilityParams, "&")
+		}
 	}
 
 	config := &Config{
 		Database: DatabaseConfig{
 			URL:             databaseURL,
-			MaxConnections:  getEnvInt("DB_MAX_CONNECTIONS", 5),    // Reduced from 10 for stability
-			ConnMaxLifetime: getEnvInt("DB_CONN_MAX_LIFETIME", 30), // Reduced from 60 for better connection cycling
+			MaxConnections:  getEnvInt("DB_MAX_CONNECTIONS", 3),    // Reduced for stability
+			ConnMaxLifetime: getEnvInt("DB_CONN_MAX_LIFETIME", 15), // Shorter lifetime for better cycling
 		},
 		Server: ServerConfig{
 			Port:          getEnv("SERVER_PORT", "8081"),

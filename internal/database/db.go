@@ -25,17 +25,26 @@ func New(cfg *config.DatabaseConfig) (*DB, error) {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
-	// Configure connection pool
+	// Enhanced connection pool configuration for stability
 	conn.SetMaxOpenConns(cfg.MaxConnections)
-	conn.SetMaxIdleConns(cfg.MaxConnections / 2)
+	conn.SetMaxIdleConns(1) // Keep minimal idle connections to prevent stale connections
 	conn.SetConnMaxLifetime(time.Duration(cfg.ConnMaxLifetime) * time.Minute)
+	conn.SetConnMaxIdleTime(5 * time.Minute) // Force idle connection refresh
 
-	// Test connection
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// Test connection with extended timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	if err := conn.PingContext(ctx); err != nil {
+		conn.Close() // Clean up on failure
 		return nil, fmt.Errorf("failed to ping database: %w", err)
+	}
+
+	// Test a simple query to ensure the connection works properly
+	var result int
+	if err := conn.QueryRowContext(ctx, "SELECT 1").Scan(&result); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("failed to execute test query: %w", err)
 	}
 
 	return &DB{conn: conn}, nil
@@ -323,6 +332,35 @@ func (db *DB) GetTradesByParent(ctx context.Context, parentTradeID int) ([]*Trad
 	}
 
 	return trades, nil
+}
+
+// GetTradeByID retrieves a specific trade by its ID
+func (db *DB) GetTradeByID(ctx context.Context, tradeID int) (*Trade, error) {
+	query := `
+		SELECT id, uuid, signal_id, parent_signal_id, parent_trade_id, trade_type, symbol, order_type, direction, volume, entry_price,
+		       current_price, stop_loss, take_profit, tp1, tp2, sl1, sl2, status, mt5_ticket, mt5_response,
+		       profit_loss, commission, swap, created_at, updated_at, closed_at
+		FROM trades 
+		WHERE id = $1
+	`
+
+	trade := &Trade{}
+	err := db.conn.QueryRowContext(ctx, query, tradeID).Scan(
+		&trade.ID, &trade.UUID, &trade.SignalID, &trade.ParentSignalID, &trade.ParentTradeID, &trade.TradeType, &trade.Symbol, &trade.OrderType,
+		&trade.Direction, &trade.Volume, &trade.EntryPrice, &trade.CurrentPrice,
+		&trade.StopLoss, &trade.TakeProfit, &trade.TP1, &trade.TP2, &trade.SL1, &trade.SL2, &trade.Status, &trade.MT5Ticket,
+		&trade.MT5Response, &trade.ProfitLoss, &trade.Commission, &trade.Swap,
+		&trade.CreatedAt, &trade.UpdatedAt, &trade.ClosedAt,
+	)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("trade with ID %d not found", tradeID)
+		}
+		return nil, fmt.Errorf("failed to query trade: %w", err)
+	}
+
+	return trade, nil
 }
 
 // LogEvent logs a system event

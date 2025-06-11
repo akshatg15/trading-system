@@ -68,6 +68,25 @@ type TradeResponse struct {
 	TP2Ticket            int64   `json:"tp2_ticket,omitempty"`           // TP2 position ticket
 }
 
+// PositionModifyRequest represents a position modification request for TP/SL
+type PositionModifyRequest struct {
+	PositionTicket int64    `json:"position_ticket"`
+	Symbol         string   `json:"symbol"`
+	TakeProfit     float64  `json:"take_profit,omitempty"`
+	StopLoss       *float64 `json:"stop_loss,omitempty"`
+	PartialVolume  float64  `json:"partial_volume,omitempty"` // For partial TP orders
+	TPType         string   `json:"tp_type,omitempty"`        // "tp1" or "tp2"
+}
+
+// PositionModifyResponse represents MT5 position modification response
+type PositionModifyResponse struct {
+	Success        bool    `json:"success"`
+	TPOrderTicket  int64   `json:"tp_order_ticket,omitempty"`  // Ticket of the TP order created
+	ErrorCode      int     `json:"error_code,omitempty"`
+	ErrorMsg       string  `json:"error_msg,omitempty"`
+	Commission     float64 `json:"commission,omitempty"`
+}
+
 // OrderInfo represents pending order information
 type OrderInfo struct {
 	Ticket     int64   `json:"ticket"`
@@ -197,7 +216,7 @@ func (c *Client) GetPositions(ctx context.Context) ([]*PositionInfo, error) {
 
 // GetPositionCount retrieves the number of open positions efficiently
 func (c *Client) GetPositionCount(ctx context.Context) (int, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+"/position-count", nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+"/positions/count", nil)
 	if err != nil {
 		return 0, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -217,15 +236,14 @@ func (c *Client) GetPositionCount(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("MT5 bridge returned status %d: %s", resp.StatusCode, string(body))
 	}
 
-	var countResp struct {
-		Count     int    `json:"count"`
-		Timestamp string `json:"timestamp"`
+	var result struct {
+		Count int `json:"count"`
 	}
-	if err := json.Unmarshal(body, &countResp); err != nil {
+	if err := json.Unmarshal(body, &result); err != nil {
 		return 0, fmt.Errorf("failed to unmarshal position count: %w", err)
 	}
 
-	return countResp.Count, nil
+	return result.Count, nil
 }
 
 // GetAccountInfo retrieves account information
@@ -345,4 +363,40 @@ func (c *Client) GetOrderCount(ctx context.Context) (int, error) {
 	}
 
 	return countResp.Count, nil
+}
+
+// ModifyPosition modifies an existing position with TP/SL levels
+func (c *Client) ModifyPosition(ctx context.Context, req *PositionModifyRequest) (*PositionModifyResponse, error) {
+	reqBody, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/position/modify", bytes.NewBuffer(reqBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("HTTP request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("MT5 bridge returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var response PositionModifyResponse
+	if err := json.Unmarshal(body, &response); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
+	}
+
+	return &response, nil
 } 
